@@ -1,0 +1,7 @@
+name = "advanced-ai-cli"
+
+[test]
+preload = []
+
+[define]
+NODE_ENV = "development"

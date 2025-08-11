@@ -1,0 +1,7 @@
+#!/usr/bin/env -S bun run
+import "../src/cli/ai.ts";
+
+// Note:
+// - On Windows with Git Bash/WSL this runs fine.
+// - If your shell cannot execute bin/ai directly, use:
+//     bun run bin/ai -- --help

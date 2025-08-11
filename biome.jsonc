@@ -1,0 +1,11 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.1.2/schema.json",
+  "extends": ["ultracite"],
+  "linter": {
+    "rules": {}
+  },
+  "formatter": {
+    "indentWidth": 4,
+    "indentStyle": "tab"
+  }
+}

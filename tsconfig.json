@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": [
+      "bun",
+      "node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@cli/*": [
+        "src/cli/*"
+      ],
+      "@obs/*": [
+        "src/obs/*"
+      ],
+      "@util/*": [
+        "src/util/*"
+      ]
+    },
+    "strictNullChecks": true
+  },
+  "include": [
+    "src",
+    "bin",
+    "bunfig.toml"
+  ]
+}
