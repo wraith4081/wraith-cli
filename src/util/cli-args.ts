@@ -1,8 +1,8 @@
-export function getArgValue(
+export function getArgValueFrom(
+	argv: string[],
 	longName: string,
 	shortName?: string
 ): string | undefined {
-	const argv = process.argv.slice(2);
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === longName || (shortName && a === shortName)) {
@@ -16,4 +16,8 @@ export function getArgValue(
 		}
 	}
 	return;
+}
+
+export function stripStandaloneDashes(argv: string[]): string[] {
+	return argv.filter((a) => a !== '--');
 }
