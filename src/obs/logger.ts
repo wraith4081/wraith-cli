@@ -1,4 +1,4 @@
-import pino from 'pino';
+import pino, { type Logger } from 'pino';
 
 const redactions = [
 	'process.env.OPENAI_API_KEY',
@@ -6,11 +6,16 @@ const redactions = [
 	'apiKey',
 	'authorization',
 	'Authorization',
+	'headers.authorization',
+	'config.headers.Authorization',
 ];
 
-export function createLogger(
-	level: 'debug' | 'info' | 'warn' | 'error' = 'info'
-) {
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+let currentLevel: LogLevel = (process.env.LOG_LEVEL as LogLevel) || 'info';
+let logger: Logger | null = null;
+
+function buildLogger(level: LogLevel): Logger {
 	return pino({
 		level,
 		redact: {
@@ -18,4 +23,20 @@ export function createLogger(
 			censor: '***',
 		},
 	});
+}
+
+export function setLogLevel(level: LogLevel) {
+	currentLevel = level;
+	logger = buildLogger(level);
+}
+
+export function getLogger(): Logger {
+	if (!logger) {
+		logger = buildLogger(currentLevel);
+	}
+	return logger;
+}
+
+export function childLogger(bindings: Record<string, unknown> = {}): Logger {
+	return getLogger().child(bindings);
 }
