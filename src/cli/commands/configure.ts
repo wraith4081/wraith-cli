@@ -1,3 +1,5 @@
+/** biome-ignore-all lint/suspicious/noConsole: tbd */
+
 import { stdin as input, stdout as output } from 'node:process';
 import readline from 'node:readline/promises';
 import { getLogger } from '@obs/logger';
@@ -112,7 +114,7 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 						)
 					).toLowerCase() === 'y';
 			if (!overwrite) {
-				log.info('Aborted. No changes made.');
+				console.log('Aborted. No changes made.');
 				return;
 			}
 		}
@@ -128,50 +130,55 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 			? defaults.embeddingModel
 			: await ask('Embedding model', defaults.embeddingModel);
 
-		const ragMode = nonInteractive
-			? defaults.ragMode
-			: ((await ask('RAG mode (hot|cold|auto)', defaults.ragMode)) as
-					| 'hot'
-					| 'cold'
-					| 'auto');
+		const ragMode = (
+			nonInteractive
+				? defaults.ragMode
+				: await ask('RAG mode (hot|cold|auto)', defaults.ragMode)
+		) as 'hot' | 'cold' | 'auto';
 		if (!RAGModeZ.safeParse(ragMode).success) {
-			log.error('Invalid RAG mode; expected hot|cold|auto');
+			console.error('Invalid RAG mode; expected hot|cold|auto');
 			process.exitCode = 1;
 			return;
 		}
 
-		const approvals = nonInteractive
-			? defaults.approvals
-			: ((await ask(
-					'Tool approval policy (auto|prompt|never)',
-					defaults.approvals
-				)) as 'auto' | 'prompt' | 'never');
+		const approvals = (
+			nonInteractive
+				? defaults.approvals
+				: await ask(
+						'Tool approval policy (auto|prompt|never)',
+						defaults.approvals
+					)
+		) as 'auto' | 'prompt' | 'never';
 		if (!ApprovalPolicyZ.safeParse(approvals).success) {
-			log.error('Invalid approvals; expected auto|prompt|never');
+			console.error('Invalid approvals; expected auto|prompt|never');
 			process.exitCode = 1;
 			return;
 		}
 
-		const render = nonInteractive
-			? defaults.render
-			: ((await ask(
-					'Render mode (plain|markdown|ansi)',
-					defaults.render
-				)) as 'plain' | 'markdown' | 'ansi');
+		const render = (
+			nonInteractive
+				? defaults.render
+				: await ask(
+						'Render mode (plain|markdown|ansi)',
+						defaults.render
+					)
+		) as 'plain' | 'markdown' | 'ansi';
 		if (!RenderModeZ.safeParse(render).success) {
-			log.error('Invalid render; expected plain|markdown|ansi');
+			console.error('Invalid render; expected plain|markdown|ansi');
 			process.exitCode = 1;
 			return;
 		}
 
-		const logLevel = nonInteractive
-			? defaults.logLevel
-			: ((await ask(
-					'Log level (debug|info|warn|error)',
-					defaults.logLevel
-				)) as 'debug' | 'info' | 'warn' | 'error');
+		const logLevel = (
+			nonInteractive
+				? defaults.logLevel
+				: await ask(
+						'Log level (debug|info|warn|error)',
+						defaults.logLevel
+					)
+		) as 'debug' | 'info' | 'warn' | 'error';
 		if (!LogLevelZ.safeParse(logLevel).success) {
-			log.error('Invalid log level; expected debug|info|warn|error');
+			console.error('Invalid log level; expected debug|info|warn|error');
 			process.exitCode = 1;
 			return;
 		}
@@ -182,12 +189,14 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 					'Tool sandbox root (restrict fs tools to this path)',
 					defaults.sandboxRoot
 				);
-		const networkPolicy = nonInteractive
-			? defaults.networkPolicy
-			: ((await ask(
-					'Network policy (on|off|prompt)',
-					defaults.networkPolicy
-				)) as 'on' | 'off' | 'prompt');
+		const networkPolicy = (
+			nonInteractive
+				? defaults.networkPolicy
+				: await ask(
+						'Network policy (on|off|prompt)',
+						defaults.networkPolicy
+					)
+		) as 'on' | 'off' | 'prompt';
 
 		// Assemble a minimal but useful config (defaults + one profile)
 		const cfg: ConfigV1 = {
@@ -198,7 +207,6 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 				embeddingModel,
 				rag: {
 					mode: ragMode,
-					// Default cold driver is LanceDB (embedded), as per requirements
 					cold: { driver: 'lancedb' },
 				},
 				tools: {
@@ -208,7 +216,6 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 				approvals,
 				render,
 				logging: { level: logLevel },
-				// ingestion will use schema defaults if omitted
 			},
 			profiles: {
 				[profile]: {
@@ -225,9 +232,9 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 			ConfigV1Z.parse(cfg);
 		} catch (e) {
 			const issues = explainZodError(e);
-			log.error('Configuration is invalid:');
+			console.error('Configuration is invalid:');
 			for (const issue of issues) {
-				log.error(`- ${issue.path}: ${issue.message}`);
+				console.error(`- ${issue.path}: ${issue.message}`);
 			}
 			process.exitCode = 1;
 			return;
@@ -236,25 +243,24 @@ async function runConfigure(rawOpts: ConfigureOptions) {
 		const { path } = saveConfig(scope, cfg as unknown as ConfigUnknown, {
 			format,
 		});
-		log.info(
-			`Saved ${scope} config to: ${path}\n\nOpenAI API key not stored in config.`
-		);
+		console.log(`Saved ${scope} config to: ${path}`);
+		console.log('\nOpenAI API key is not stored in config.');
 		if (process.env.OPENAI_API_KEY) {
-			log.info(
+			console.log(
 				'Detected OPENAI_API_KEY in your environment. You are good to go.'
 			);
 		} else {
-			log.info(
+			console.log(
 				'To set your OpenAI API key, run in your shell (example):'
 			);
-			log.info('  export OPENAI_API_KEY="sk-..."');
-			log.info(
+			console.log('  export OPENAI_API_KEY="sk-..."');
+			console.log(
 				'Or add it to your shell profile (e.g., ~/.bashrc, ~/.zshrc).'
 			);
 		}
-		log.info('\nNext steps:');
-		log.info('  - Try: ai config show');
-		log.info('  - Try: ai ask "hello" --model gpt-5');
+		console.log('\nNext steps:');
+		console.log('  - Try: ai config show');
+		console.log('  - Try: ai ask "hello" --model gpt-5');
 		log.info({ msg: 'configure-complete', scope, path, format });
 	} finally {
 		if (rl) {
