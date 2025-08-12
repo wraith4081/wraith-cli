@@ -30,6 +30,8 @@ program
 	.version(VERSION ?? '0.0.0');
 
 program.option('-l, --log-level <level>', 'log level (debug|info|warn|error)');
+program.option('-p, --profile <name>', 'active profile name');
+program.option('-m, --model <name>', 'model id or alias');
 
 program.hook('preAction', (thisCmd) => {
 	const opts = thisCmd.opts<{ logLevel?: string }>();
