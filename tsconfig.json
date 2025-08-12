@@ -14,7 +14,8 @@
       "@cli/*": ["src/cli/*"],
       "@obs/*": ["src/obs/*"],
       "@util/*": ["src/util/*"],
-      "@store/*": ["src/store/*"]
+      "@store/*": ["src/store/*"],
+      "@provider/*": ["src/provider/*"]
     }
   },
   "include": ["src", "bin", "bunfig.toml"]
