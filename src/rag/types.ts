@@ -24,7 +24,6 @@ export interface ChunkEmbedding {
 }
 
 export interface RetrievedChunk {
-	id: string;
 	score: number;
 	source: 'hot' | string; // 'hot' or cold driver name
 	chunk: ChunkEmbedding;
@@ -37,4 +36,16 @@ export interface ColdIndexDriver {
 		vector: number[],
 		opts: { topK: number; filter?: { model?: string } }
 	): Promise<Array<{ score: number; chunk: ChunkEmbedding }>>;
+}
+
+// New: minimal cold index driver contract for 7.x
+export interface ColdIndexDriver {
+	init(): Promise<void>;
+	upsert(chunks: ChunkEmbedding[]): Promise<number>;
+	search(
+		queryVector: number[],
+		opts?: { topK?: number; modelFilter?: string; scoreThreshold?: number }
+	): Promise<RetrievedChunk[]>;
+	deleteByIds?(ids: string[]): Promise<number>;
+	close?(): Promise<void>;
 }
