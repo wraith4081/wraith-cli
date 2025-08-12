@@ -90,7 +90,8 @@ export interface OpenAIProviderOptions {
 }
 
 function ensureApiKey(envKey?: string): string {
-	const key = envKey || process.env.OPENAI_API_KEY;
+	const key =
+		typeof envKey === 'string' ? envKey : process.env.OPENAI_API_KEY;
 	if (!key?.trim()) {
 		throw new ProviderError(
 			'E_AUTH',

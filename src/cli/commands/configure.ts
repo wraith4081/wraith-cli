@@ -64,7 +64,7 @@ export function registerConfigureCommand(program: Command) {
 		.action(runConfigure);
 }
 
-async function runConfigure(rawOpts: ConfigureOptions) {
+export async function runConfigure(rawOpts: ConfigureOptions) {
 	const log = getLogger();
 	const scope: Scope = (rawOpts.scope as Scope) ?? 'user';
 	const format: Format = (rawOpts.format as Format) ?? 'yaml';

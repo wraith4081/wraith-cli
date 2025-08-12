@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "bun run bin/ai -- --help",
     "build": "bun build ./src/cli/ai.ts --compile --outfile ai",
-    "test": "bun test"
+    "test": "bun x vitest run",
+    "test:watch": "bun x vitest",
+    "test:ui": "bun x vitest --ui"
   },
   "devDependencies": {
     "@biomejs/biome": "2.1.2",
@@ -17,7 +19,8 @@
     "@types/node": "^24.2.1",
     "ink-testing-library": "^4.0.0",
     "msw": "^2.10.4",
-    "ultracite": "5.1.2"
+    "ultracite": "5.1.2",
+    "vitest": "^3.2.4"
   },
   "peerDependencies": {
     "typescript": "^5.9.2"

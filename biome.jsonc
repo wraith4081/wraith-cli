@@ -5,6 +5,9 @@
     "rules": {
       "performance": {
         "useTopLevelRegex": "off"
+      },
+      "nursery": {
+        "noBitwiseOperators": "off"
       }
     }
   },

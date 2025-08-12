@@ -8,7 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "types": ["bun", "node"],
+    "types": ["bun", "node", "vitest/globals"],
     "baseUrl": ".",
     "paths": {
       "@cli/*": ["src/cli/*"],
@@ -19,5 +19,5 @@
       "@models/*": ["src/models/*"]
     }
   },
-  "include": ["src", "bin", "bunfig.toml"]
+  "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]
 }
