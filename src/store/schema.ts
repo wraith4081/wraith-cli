@@ -103,15 +103,6 @@ export const DefaultsZ = z
 	})
 	.partial();
 
-export const ConfigV1Z = z.object({
-	version: z.literal('1'),
-	defaults: DefaultsZ.optional(),
-	profiles: z.record(z.string(), ProfileZ).optional(),
-});
-
-export type ConfigV1 = z.infer<typeof ConfigV1Z>;
-export type Profile = z.infer<typeof ProfileZ>;
-
 export function explainZodError(e: unknown) {
 	if (!(e instanceof z.ZodError)) {
 		return [];
@@ -122,3 +113,30 @@ export function explainZodError(e: unknown) {
 		code: err.code,
 	}));
 }
+
+export const ModelCatalogEntryZ = z.object({
+	id: z.string(),
+	label: z.string().optional(),
+	contextLength: z.number().int().positive().optional(),
+	modalities: z.array(z.string()).optional(),
+});
+
+export const ModelsConfigZ = z
+	.object({
+		catalog: z.record(z.string(), ModelCatalogEntryZ).optional(),
+		aliases: z.record(z.string(), z.string()).optional(),
+	})
+	.partial();
+
+export type ModelsConfig = z.infer<typeof ModelsConfigZ>;
+export type ModelCatalogEntry = z.infer<typeof ModelCatalogEntryZ>;
+
+export const ConfigV1Z = z.object({
+	version: z.literal('1'),
+	defaults: DefaultsZ.optional(),
+	profiles: z.record(z.string(), ProfileZ).optional(),
+	models: ModelsConfigZ.optional(),
+});
+
+export type ConfigV1 = z.infer<typeof ConfigV1Z>;
+export type Profile = z.infer<typeof ProfileZ>;

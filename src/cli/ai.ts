@@ -5,6 +5,7 @@ import { loadConfig } from '@store/config';
 import { formatBuildInfo, VERSION } from '@util/build-info';
 import { Command } from 'commander';
 import { registerConfigureCommand } from './commands/configure';
+import { registerModelsCommand } from './commands/models';
 
 if (typeof globalThis.Bun === 'undefined') {
 	console.error(
@@ -74,5 +75,6 @@ program
 	});
 
 registerConfigureCommand(program);
+registerModelsCommand(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);
