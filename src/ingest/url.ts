@@ -57,17 +57,32 @@ function parseContentType(ct?: string | null): {
 	}
 	return { type, charset };
 }
-
 async function readStreamWithCap(
 	response: Response,
 	maxBytes: number
 ): Promise<{ data: Uint8Array; bytes: number; truncated: boolean }> {
-	const body = response.body;
-	if (!body) {
-		return { data: new Uint8Array(), bytes: 0, truncated: false };
+	const body: unknown = response.body;
+
+	// Fallback: if no Web Streams reader, use arrayBuffer() and clamp.
+	const hasReader =
+		body &&
+		typeof (body as { getReader?: unknown }).getReader === 'function';
+
+	if (!hasReader) {
+		const ab = await response.arrayBuffer();
+		const buf = new Uint8Array(ab);
+		if (buf.byteLength <= maxBytes) {
+			return { data: buf, bytes: buf.byteLength, truncated: false };
+		}
+		return {
+			data: buf.slice(0, maxBytes),
+			bytes: maxBytes,
+			truncated: true,
+		};
 	}
 
-	const reader = body.getReader();
+	// Stream with cap
+	const reader = (body as ReadableStream<Uint8Array>).getReader();
 	const chunks: Uint8Array[] = [];
 	let received = 0;
 	let truncated = false;
@@ -78,26 +93,33 @@ async function readStreamWithCap(
 			if (done) {
 				break;
 			}
-			if (value) {
-				received += value.byteLength;
-				if (received > maxBytes) {
-					truncated = true;
-					// keep up to maxBytes: trim this chunk if necessary
-					const remaining = maxBytes - (received - value.byteLength);
-					if (remaining > 0) {
-						chunks.push(value.slice(0, remaining));
-					}
-					break;
-				}
-				chunks.push(value);
+			if (!value) {
+				continue;
 			}
+
+			// If this chunk would exceed cap, trim and stop.
+			if (received + value.byteLength > maxBytes) {
+				const remaining = maxBytes - received;
+				if (remaining > 0) {
+					chunks.push(value.slice(0, remaining));
+				}
+				truncated = true;
+				// End the reader without awaiting cancellation (avoid hangs).
+				try {
+					// Cancel without awaiting to prevent potential hangs.
+					reader.cancel();
+				} catch {
+					// ignore
+				}
+				break;
+			}
+
+			chunks.push(value);
+			received += value.byteLength;
 		}
 	} finally {
 		try {
 			reader.releaseLock();
-			if (typeof response.body?.cancel === 'function') {
-				await response.body.cancel();
-			}
 		} catch {
 			// ignore
 		}

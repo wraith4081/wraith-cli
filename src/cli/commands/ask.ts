@@ -1,5 +1,6 @@
 /** biome-ignore-all lint/suspicious/noConsole: tbd */
 
+import { computeAttachmentSummary } from '@core/context';
 import { runAsk } from '@core/orchestrator';
 import { OpenAIProvider } from '@provider/openai';
 import { isProviderError } from '@provider/types';
@@ -18,6 +19,28 @@ export function registerAskCommand(program: Command) {
 			'Abort request after <ms> milliseconds',
 			Number.parseInt
 		)
+		.option(
+			'--file <path>',
+			'Attach a file (repeatable)',
+			(val, prev: string[]) => (prev ? [...prev, val] : [val]),
+			[]
+		)
+		.option(
+			'--dir <path>',
+			'Attach a directory (repeatable)',
+			(val, prev: string[]) => (prev ? [...prev, val] : [val]),
+			[]
+		)
+		.option(
+			'--url <link>',
+			'Attach a URL (repeatable)',
+			(val, prev: string[]) => (prev ? [...prev, val] : [val]),
+			[]
+		)
+		.option(
+			'--no-context-summary',
+			'Do not print the pre-send context summary'
+		)
 		.action(
 			async (
 				promptParts: string[],
@@ -25,6 +48,10 @@ export function registerAskCommand(program: Command) {
 					json?: boolean;
 					noStream?: boolean;
 					timeout?: number;
+					file?: string[];
+					dir?: string[];
+					url?: string[];
+					contextSummary?: boolean; // presence of --no-context-summary sets this false
 				}
 			) => {
 				const prompt = promptParts.join(' ').trim();
@@ -57,17 +84,41 @@ export function registerAskCommand(program: Command) {
 				}
 
 				const provider = new OpenAIProvider();
-
-				const globalOpts = program.opts<{
-					model?: string;
-					profile?: string;
-				}>();
-
 				try {
+					const filePaths = opts.file ?? [];
+					const dirPaths = opts.dir ?? [];
+					const urls = opts.url ?? [];
+
+					// Pre-send context summary (if any attachments present and not suppressed)
+					if (
+						(filePaths.length > 0 ||
+							dirPaths.length > 0 ||
+							urls.length > 0) &&
+						opts.contextSummary !== false &&
+						!opts.json
+					) {
+						const summary = await computeAttachmentSummary({
+							rootDir: process.cwd(),
+							filePaths,
+							dirPaths,
+							urls,
+							config: merged,
+						});
+						for (const line of summary.lines) {
+							process.stdout.write(`$${line}\n`);
+						}
+						process.stdout.write('\n');
+					}
+
+					const globalOpts = program.opts<{
+						model?: string;
+						profile?: string;
+					}>();
 					const onDelta =
 						opts.json || opts.noStream
 							? undefined
 							: (chunk: string) => process.stdout.write(chunk);
+
 					const { answer, model, usage, timing } = await runAsk(
 						{
 							prompt,
