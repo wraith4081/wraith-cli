@@ -4,6 +4,7 @@ import { getLogger, type LogLevel, setLogLevel } from '@obs/logger';
 import { loadConfig } from '@store/config';
 import { formatBuildInfo, VERSION } from '@util/build-info';
 import { Command } from 'commander';
+import { registerConfigureCommand } from './commands/configure';
 
 if (typeof globalThis.Bun === 'undefined') {
 	console.error(
@@ -71,5 +72,7 @@ program
 			console.log(JSON.stringify(merged, null, 2));
 		}
 	});
+
+registerConfigureCommand(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);
