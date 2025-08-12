@@ -22,3 +22,19 @@ export interface ChunkEmbedding {
 	tokensEstimated: number;
 	chunkRef: Chunk; // original chunk (for provenance)
 }
+
+export interface RetrievedChunk {
+	id: string;
+	score: number;
+	source: 'hot' | string; // 'hot' or cold driver name
+	chunk: ChunkEmbedding;
+}
+
+export interface ColdIndexDriver {
+	name: string;
+	upsert(items: ChunkEmbedding[]): Promise<void>;
+	queryByVector(
+		vector: number[],
+		opts: { topK: number; filter?: { model?: string } }
+	): Promise<Array<{ score: number; chunk: ChunkEmbedding }>>;
+}

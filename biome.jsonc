@@ -11,7 +11,8 @@
         "noAwaitInLoop": "off"
       },
       "style": {
-        "noParameterProperties": "off"
+        "noParameterProperties": "off",
+        "noNestedTernary": "off"
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": "off"
