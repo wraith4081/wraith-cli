@@ -22,7 +22,9 @@ describe('Ignore Engine', () => {
 	afterEach(() => {
 		try {
 			fs.rmSync(root, { recursive: true, force: true });
-		} catch {}
+		} catch {
+			//
+		}
 	});
 
 	it('respects .gitignore when enabled', () => {

@@ -13,10 +13,6 @@ export interface IgnoreFilterOptions {
 
 export type PathFilter = (absOrRelPath: string, isDir?: boolean) => boolean;
 
-/**
- * Build an include filter (returns true when a path should be included).
- * Apply precedence: includeAlways > (not ignored by .gitignore + patterns)
- */
 export function buildIgnoreFilterFromSettings(
 	opts: IgnoreFilterOptions
 ): PathFilter {
@@ -65,10 +61,6 @@ export function buildIgnoreFilterFromSettings(
 	};
 }
 
-/**
- * Convenience builder that derives settings from ConfigV1.defaults.ingestion,
- * falling back to schema defaults if absent.
- */
 export function buildIgnoreFilterFromConfig(
 	rootDir: string,
 	cfgUnknown?: unknown
@@ -79,8 +71,8 @@ export function buildIgnoreFilterFromConfig(
 		: IngestionConfigZ.parse(undefined); // gets schema defaults
 	return buildIgnoreFilterFromSettings({
 		rootDir,
-		useGitIgnore: ingestion.ignore.useGitIgnore,
-		patterns: ingestion.ignore.patterns,
-		includeAlways: ingestion.ignore.includeAlways,
+		useGitIgnore: ingestion.ignore?.useGitIgnore,
+		patterns: ingestion.ignore?.patterns,
+		includeAlways: ingestion.ignore?.includeAlways,
 	});
 }
