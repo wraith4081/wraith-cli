@@ -1,10 +1,11 @@
 import { resolveEffectiveModel } from '@models/selection';
 import { OpenAIProvider } from '@provider/openai';
 import type { ChatUsage, IProvider } from '@provider/types';
+import {
+	buildEffectiveSystemPrompt,
+	getDefaultSystemPrompt,
+} from '@rules/manager';
 import { loadConfig } from '@store/config';
-
-const DEFAULT_SYSTEM_PROMPT =
-	'You are a helpful developer CLI assistant. Provide concise, accurate answers suitable for terminal output.';
 
 export interface AskOptions {
 	prompt: string;
@@ -13,10 +14,10 @@ export interface AskOptions {
 }
 
 export interface AskDeps {
-	provider?: IProvider; // if omitted, uses OpenAIProvider()
-	config?: unknown; // if omitted, uses loadConfig().merged
-	onDelta?: (chunk: string) => void; // called on streamed tokens
-	signal?: AbortSignal; // cancellation support
+	provider?: IProvider;
+	config?: unknown;
+	onDelta?: (chunk: string) => void;
+	signal?: AbortSignal;
 }
 
 export interface AskResult {
@@ -41,6 +42,11 @@ export async function runAsk(
 
 	const provider: IProvider = deps.provider ?? new OpenAIProvider();
 
+	// For 4.1: default system prompt only (no user/project/override yet)
+	const systemPrompt = buildEffectiveSystemPrompt({
+		defaultPrompt: getDefaultSystemPrompt(),
+	});
+
 	let accumulated = '';
 	const onDelta = (s: string) => {
 		accumulated += s;
@@ -53,7 +59,7 @@ export async function runAsk(
 		{
 			model: selection.modelId,
 			messages: [
-				{ role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+				{ role: 'system', content: systemPrompt },
 				{ role: 'user', content: opts.prompt },
 			],
 		},

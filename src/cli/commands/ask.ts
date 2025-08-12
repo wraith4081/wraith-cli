@@ -57,17 +57,22 @@ export function registerAskCommand(program: Command) {
 				}
 
 				const provider = new OpenAIProvider();
+
+				const globalOpts = program.opts<{
+					model?: string;
+					profile?: string;
+				}>();
+
 				try {
 					const onDelta =
 						opts.json || opts.noStream
 							? undefined
 							: (chunk: string) => process.stdout.write(chunk);
-
 					const { answer, model, usage, timing } = await runAsk(
 						{
 							prompt,
-							modelFlag: program.opts?.().model, // commander stores global options on program
-							profileFlag: program.opts?.().profile,
+							modelFlag: globalOpts.model,
+							profileFlag: globalOpts.profile,
 						},
 						{ provider, config: merged, onDelta, signal }
 					);

@@ -19,6 +19,7 @@ export default defineConfig({
 			'@provider': path.resolve(__dirname, 'src/provider'),
 			'@models': path.resolve(__dirname, 'src/models'),
 			'@core': path.resolve(__dirname, 'src/core'),
+			'@rules': path.resolve(__dirname, 'src/rules'),
 		},
 	},
 });
