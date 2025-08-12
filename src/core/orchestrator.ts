@@ -1,6 +1,7 @@
 import { resolveEffectiveModel } from '@models/selection';
 import { OpenAIProvider } from '@provider/openai';
 import type { ChatUsage, IProvider } from '@provider/types';
+import { loadUserAndProjectRules } from '@rules/loader';
 import {
 	buildEffectiveSystemPrompt,
 	getDefaultSystemPrompt,
@@ -42,9 +43,19 @@ export async function runAsk(
 
 	const provider: IProvider = deps.provider ?? new OpenAIProvider();
 
-	// For 4.1: default system prompt only (no user/project/override yet)
+	// Load rules from user/project files and build the effective system prompt
+	const { userSections, projectSections } = loadUserAndProjectRules({
+		config: mergedConfig,
+		profileName: selection.profile,
+		overLimitBehavior: 'summarize',
+		maxChars: 16_000,
+	});
+
 	const systemPrompt = buildEffectiveSystemPrompt({
 		defaultPrompt: getDefaultSystemPrompt(),
+		userSections,
+		projectSections,
+		// per-command override will be added in a later task
 	});
 
 	let accumulated = '';
