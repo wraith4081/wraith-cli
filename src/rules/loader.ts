@@ -206,7 +206,7 @@ function measureChars(sections: RuleSection[]): number {
 	return sum;
 }
 
-function enforceSizeThreshold(
+export function enforceSizeThreshold(
 	sections: RuleSection[],
 	maxChars: number,
 	behavior: OverLimitBehavior
