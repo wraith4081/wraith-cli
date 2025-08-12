@@ -7,7 +7,8 @@
         "useTopLevelRegex": "off"
       },
       "nursery": {
-        "noBitwiseOperators": "off"
+        "noBitwiseOperators": "off",
+        "noAwaitInLoop": "off"
       },
       "style": {
         "noParameterProperties": "off"
