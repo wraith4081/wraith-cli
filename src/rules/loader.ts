@@ -49,10 +49,6 @@ export interface LoadRulesOptions {
 	overLimitBehavior?: OverLimitBehavior;
 }
 
-/**
- * Load user and project rules, validate, and enforce size threshold.
- * Merge order is handled later in the prompt builder (default < user < project).
- */
 export function loadUserAndProjectRules(opts: LoadRulesOptions = {}): {
 	userSections: RuleSection[];
 	projectSections: RuleSection[];
@@ -232,7 +228,6 @@ export function enforceSizeThreshold(
 	}
 	// summarize: include as many rules as fit, then append an omission note
 	const out: RuleSection[] = [];
-	let count = 0;
 	let includedChars = 0;
 
 	for (const sec of sections) {
@@ -251,7 +246,6 @@ export function enforceSizeThreshold(
 			}
 			newSec.rules.push(rule);
 			includedChars += ruleCost;
-			count++;
 		}
 		out.push(newSec);
 	}
