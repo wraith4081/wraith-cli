@@ -4,6 +4,7 @@ import { getLogger, type LogLevel, setLogLevel } from '@obs/logger';
 import { loadConfig } from '@store/config';
 import { formatBuildInfo, VERSION } from '@util/build-info';
 import { Command } from 'commander';
+import { registerAskCommand } from './commands/ask';
 import { registerConfigureCommand } from './commands/configure';
 import { registerModelsCommand } from './commands/models';
 
@@ -78,5 +79,6 @@ program
 
 registerConfigureCommand(program);
 registerModelsCommand(program);
+registerAskCommand(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);

@@ -16,7 +16,8 @@
       "@util/*": ["src/util/*"],
       "@store/*": ["src/store/*"],
       "@provider/*": ["src/provider/*"],
-      "@models/*": ["src/models/*"]
+      "@models/*": ["src/models/*"],
+      "@core/*": ["src/core/*"]
     }
   },
   "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]

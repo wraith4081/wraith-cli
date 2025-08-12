@@ -18,6 +18,7 @@ export default defineConfig({
 			'@store': path.resolve(__dirname, 'src/store'),
 			'@provider': path.resolve(__dirname, 'src/provider'),
 			'@models': path.resolve(__dirname, 'src/models'),
+			'@core': path.resolve(__dirname, 'src/core'),
 		},
 	},
 });

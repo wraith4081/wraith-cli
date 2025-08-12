@@ -8,6 +8,9 @@
       },
       "nursery": {
         "noBitwiseOperators": "off"
+      },
+      "style": {
+        "noParameterProperties": "off"
       }
     }
   },
