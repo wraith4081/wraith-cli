@@ -101,13 +101,17 @@ export function loadUserAndProjectRules(opts: LoadRulesOptions = {}): {
 
 	// Enforce size threshold per scope
 	const userSized = enforceSizeThreshold(userSections, maxChars, overLimit);
-	if (userSized.truncated) truncated = true;
+	if (userSized.truncated) {
+		truncated = true;
+	}
 	const projectSized = enforceSizeThreshold(
 		projectSections,
 		maxChars,
 		overLimit
 	);
-	if (projectSized.truncated) truncated = true;
+	if (projectSized.truncated) {
+		truncated = true;
+	}
 
 	if (userSized.error) {
 		errors.push({
@@ -149,7 +153,9 @@ function findFirstExistingRules(
 ): string | undefined {
 	for (const name of candidates) {
 		const p = path.join(baseDir, name);
-		if (fs.existsSync(p)) return p;
+		if (fs.existsSync(p)) {
+			return p;
+		}
 	}
 	return;
 }
@@ -159,7 +165,9 @@ function readRulesFile(
 	scope: 'user' | 'project',
 	errors: RuleLoadError[]
 ): RuleSection[] {
-	if (!filePath) return [];
+	if (!filePath) {
+		return [];
+	}
 	try {
 		const raw = fs.readFileSync(filePath, 'utf8');
 		const data: unknown = filePath.endsWith('.json')
@@ -231,12 +239,16 @@ export function enforceSizeThreshold(
 		const newSec: RuleSection = { title: sec.title, rules: [] };
 		// cost of section title line
 		const secCost = sec.title.length + 4;
-		if (includedChars + secCost > maxChars) break;
+		if (includedChars + secCost > maxChars) {
+			break;
+		}
 		includedChars += secCost;
 
 		for (const rule of sec.rules) {
 			const ruleCost = rule.length + 3;
-			if (includedChars + ruleCost > maxChars) break;
+			if (includedChars + ruleCost > maxChars) {
+				break;
+			}
 			newSec.rules.push(rule);
 			includedChars += ruleCost;
 			count++;
@@ -253,8 +265,8 @@ export function enforceSizeThreshold(
 		if (out.length === 0) {
 			out.push({ title: 'Rules (summary)', rules: [] });
 		}
-		const last = out[out.length - 1];
-		last.rules.push(
+		const last = out.at(-1);
+		last?.rules.push(
 			`… ${omittedCount} additional rule(s) omitted due to size limits.`
 		);
 	}

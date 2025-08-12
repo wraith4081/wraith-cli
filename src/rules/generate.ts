@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLogger } from '@obs/logger';
 
 import type { IProvider } from '@provider/types';
 import { getProjectWraithDir } from '@util/paths';
@@ -105,7 +104,6 @@ export async function generateProjectRules(
 	deps: GenerateRulesDeps,
 	opts: GenerateRulesOptions = {}
 ): Promise<Ruleset> {
-	const log = getLogger();
 	const maxChars = opts.maxChars ?? 16_000;
 	const behavior: OverLimitBehavior = opts.overLimitBehavior ?? 'summarize';
 	const maxRetries = Math.max(0, Math.min(opts.retries ?? 1, 3)); // up to 3 retries

@@ -11,6 +11,9 @@
       },
       "style": {
         "noParameterProperties": "off"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "off"
       }
     }
   },
