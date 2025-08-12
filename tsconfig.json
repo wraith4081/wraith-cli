@@ -18,7 +18,8 @@
       "@provider/*": ["src/provider/*"],
       "@models/*": ["src/models/*"],
       "@core/*": ["src/core/*"],
-      "@rules/*": ["src/rules/*"]
+      "@rules/*": ["src/rules/*"],
+      "@ingest/*": ["src/ingest/*"]
     }
   },
   "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]

@@ -20,6 +20,7 @@ export default defineConfig({
 			'@models': path.resolve(__dirname, 'src/models'),
 			'@core': path.resolve(__dirname, 'src/core'),
 			'@rules': path.resolve(__dirname, 'src/rules'),
+			'@ingest': path.resolve(__dirname, 'src/ingest'),
 		},
 	},
 });
