@@ -23,6 +23,7 @@ export default defineConfig({
 			'@ingest': path.resolve(__dirname, 'src/ingest'),
 			'@rag': path.resolve(__dirname, 'src/rag'),
 			'@tools': path.resolve(__dirname, 'src/tools'),
+			'@render': path.resolve(__dirname, 'src/render'),
 		},
 	},
 });

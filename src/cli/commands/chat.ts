@@ -1,10 +1,11 @@
 import readline from 'node:readline';
 import { startChatSession } from '@core/orchestrator';
+import { type RenderMode, renderText } from '@render/markdown';
 
 export interface ChatCliOptions {
 	modelFlag?: string;
 	profileFlag?: string;
-	// Future toggles could live here (e.g., --no-stream)
+	render?: RenderMode; // default 'markdown'
 }
 
 export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
@@ -12,6 +13,9 @@ export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
 		modelFlag: opts.modelFlag,
 		profileFlag: opts.profileFlag,
 	});
+
+	const render: RenderMode = opts.render ?? 'markdown';
+	const streamable = render === 'markdown';
 
 	const rl = readline.createInterface({
 		input: process.stdin,
@@ -60,26 +64,32 @@ export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
 
 		const aborter = new AbortController();
 		currentAbort = aborter;
-		streaming = true;
+		streaming = streamable;
 		const detach = attachSigintForAbort();
+
 		const res = await session.runAssistant(
-			(d) => process.stdout.write(d),
+			streamable ? (d) => process.stdout.write(d) : undefined,
 			aborter.signal
 		);
-
-		if (res.notices && res.notices.length > 0) {
-			// Print any notices about context trimming before ending the line
-			for (const n of res.notices) {
-				process.stdout.write(`\n${n}\n`);
-			}
-		}
 		detach();
 		streaming = false;
 		currentAbort = null;
 
-		// Ensure newline after streamed/aborted content
-		if (!res.content.endsWith('\n')) {
-			process.stdout.write('\n');
+		let out = res.content;
+		if (!streamable) {
+			out = renderText(out, render);
+		}
+
+		// Ensure newline and show notices (context trimming)
+		if (!out.endsWith('\n')) {
+			out += '\n';
+		}
+		process.stdout.write(out);
+
+		if (res.notices && res.notices.length > 0) {
+			for (const n of res.notices) {
+				process.stdout.write(`${n}\n`);
+			}
 		}
 
 		if (res.aborted) {
@@ -108,10 +118,17 @@ export function registerChatCommand(program: unknown): void {
 			)
 			.option('-m, --model <id>', 'Override model id')
 			.option('-p, --profile <name>', 'Use profile defaults')
+			.option(
+				'--render <mode>',
+				'Rendering: plain|markdown|ansi',
+				'markdown'
+			)
+
 			.action(async (flags: Record<string, unknown>) => {
 				const code = await handleChatCommand({
 					modelFlag: toOpt(flags.model),
 					profileFlag: toOpt(flags.profile),
+					render: toRender(flags.render),
 				});
 				process.exitCode = code;
 			});
@@ -125,12 +142,14 @@ export function registerChatCommand(program: unknown): void {
 			'Interactive chat session (Ctrl+C aborts the current stream)'
 		)
 		.option('-m, --model <id>', 'Override model id')
+		.option('--render <mode>', 'Rendering: plain|markdown|ansi', 'markdown')
 		.option('-p, --profile <name>', 'Use profile defaults');
 
 	cmd.action(async (flags: Record<string, unknown>) => {
 		const code = await handleChatCommand({
 			modelFlag: toOpt(flags.model),
 			profileFlag: toOpt(flags.profile),
+			render: toRender(flags.render),
 		});
 		process.exitCode = code;
 	});
@@ -138,4 +157,9 @@ export function registerChatCommand(program: unknown): void {
 
 function toOpt(v: unknown): string | undefined {
 	return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+
+function toRender(v: unknown): RenderMode {
+	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
+	return s === 'plain' || s === 'ansi' ? (s as RenderMode) : 'markdown';
 }

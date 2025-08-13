@@ -1,5 +1,6 @@
 import { type AskResult, runAsk } from '@core/orchestrator';
 import { isProviderError } from '@provider/types';
+import { type RenderMode, renderText } from '@render/markdown';
 
 export function formatAskJsonOk(result: AskResult) {
 	return {
@@ -39,19 +40,22 @@ export interface AskCliOptions {
 	profileFlag?: string;
 	json?: boolean;
 	stream?: boolean; // default true unless --no-stream
+	render?: RenderMode; // 'plain' | 'markdown' | 'ansi'
 }
 
 export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 	const startedAt = Date.now();
+	const render: RenderMode = opts.render ?? 'markdown';
 
-	// Read prompt from stdin if '-' is passed
+	// Force no-stream for non-markdown modes so we can render properly.
+	const forceNoStream = render !== 'markdown';
+	const wantStream = opts.stream !== false && !forceNoStream;
+	const wantJson = opts.json === true;
+
 	const prompt =
 		opts.prompt === '-'
 			? await readAllFromStdin()
 			: String(opts.prompt ?? '');
-
-	const wantJson = opts.json === true;
-	const wantStream = opts.stream !== false; // default: stream unless --no-stream
 
 	try {
 		let streamed = '';
@@ -78,12 +82,19 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 			return 0;
 		}
 
-		// If we didn't stream, print the whole answer now.
-		if (!wantStream || streamed.length === 0) {
-			process.stdout.write(result.answer);
-			if (!result.answer.endsWith('\n')) {
+		if (wantStream && streamed.length > 0) {
+			// streamed markdown already printed; ensure newline
+			if (!streamed.endsWith('\n')) {
 				process.stdout.write('\n');
 			}
+			return 0;
+		}
+
+		// Non-stream path or forced render: print whole rendered answer
+		const rendered = renderText(result.answer, render);
+		process.stdout.write(rendered);
+		if (!rendered.endsWith('\n')) {
+			process.stdout.write('\n');
 		}
 		return 0;
 	} catch (err) {
@@ -92,7 +103,6 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 			process.stdout.write(`${JSON.stringify(out)}\n`);
 			return 1;
 		}
-		// Human-readable stderr
 		const msg = isProviderError(err)
 			? `[${err.code}${err.status ? ` ${err.status}` : ''}] ${err.message}`
 			: err instanceof Error
@@ -127,10 +137,16 @@ export function registerAskCommand(program: unknown): void {
 				'--json',
 				'Emit JSON { ok, answer|error, model, usage, timing }'
 			)
+			.option(
+				'--render <mode>',
+				'Rendering: plain|markdown|ansi',
+				'markdown'
+			)
 			.option('--no-stream', 'Disable token streaming; print once at end')
 			.action(async (prompt: string, flags: Record<string, unknown>) => {
 				const code = await handleAskCommand({
 					prompt,
+					render: toRender(flags.render),
 					modelFlag: toOpt(flags.model),
 					profileFlag: toOpt(flags.profile),
 					json: !!flags.json,
@@ -168,6 +184,7 @@ export function registerAskCommand(program: unknown): void {
 		cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
 			const code = await handleAskCommand({
 				prompt,
+				render: toRender(flags.render),
 				modelFlag: toOpt(flags.model),
 				profileFlag: toOpt(flags.profile),
 				json: !!flags.json,
@@ -201,4 +218,9 @@ function readAllFromStdin(): Promise<string> {
 		);
 		process.stdin.resume();
 	});
+}
+
+function toRender(v: unknown): RenderMode {
+	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
+	return s === 'plain' || s === 'ansi' ? (s as RenderMode) : 'markdown';
 }
