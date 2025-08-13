@@ -62,11 +62,17 @@ export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
 		currentAbort = aborter;
 		streaming = true;
 		const detach = attachSigintForAbort();
-
 		const res = await session.runAssistant(
 			(d) => process.stdout.write(d),
 			aborter.signal
 		);
+
+		if (res.notices && res.notices.length > 0) {
+			// Print any notices about context trimming before ending the line
+			for (const n of res.notices) {
+				process.stdout.write(`\n${n}\n`);
+			}
+		}
 		detach();
 		streaming = false;
 		currentAbort = null;

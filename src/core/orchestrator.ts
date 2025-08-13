@@ -7,6 +7,7 @@ import {
 	getDefaultSystemPrompt,
 } from '@rules/manager';
 import { loadConfig } from '@store/config';
+import { fitMessagesToContext } from './context-window';
 
 export interface AskOptions {
 	prompt: string;
@@ -35,11 +36,13 @@ export interface AskOkJson {
 	usage?: ChatUsage;
 	timing: { startedAt: number; elapsedMs: number };
 }
+
 export interface ChatTurnResult {
 	content: string;
 	model: string;
 	usage?: ChatUsage;
 	aborted?: boolean;
+	notices?: string[];
 	timing: { startedAt: number; elapsedMs: number };
 }
 
@@ -113,11 +116,20 @@ export function startChatSession(
 			let acc = '';
 			let aborted = false;
 
+			// We send a *bounded* copy; the real session history remains intact.
+			const bounded = fitMessagesToContext(history, {
+				modelId: selection.modelId,
+				// Defaults are safe; later we can make this configurable per model/profile.
+			}).messages;
+			const notices = fitMessagesToContext(history, {
+				modelId: selection.modelId,
+			}).notices;
+
 			try {
 				const res = await provider.streamChat(
 					{
 						model: selection.modelId,
-						messages: history,
+						messages: bounded,
 					},
 					(d) => {
 						if (
@@ -136,7 +148,7 @@ export function startChatSession(
 				const elapsedMs = Date.now() - startedAt;
 				const content = acc.length > 0 ? acc : (res.content ?? '');
 
-				// Persist assistant message
+				// Persist assistant message that the user actually saw
 				history.push({ role: 'assistant', content });
 
 				return {
@@ -144,17 +156,14 @@ export function startChatSession(
 					model: selection.modelId,
 					usage: res.usage,
 					aborted: false,
+					notices,
 					timing: { startedAt, elapsedMs },
 				};
 			} catch {
-				// Treat abort/timeouts as partial success if we streamed tokens
 				const elapsedMs = Date.now() - startedAt;
 				aborted = true;
 
-				// Record whatever we have so far to keep session consistent
 				const content = acc;
-
-				// Persist assistant message even if partial, so the session context reflects what user saw
 				if (content.length > 0) {
 					history.push({ role: 'assistant', content });
 				}
@@ -164,6 +173,7 @@ export function startChatSession(
 					model: selection.modelId,
 					usage: undefined,
 					aborted,
+					notices,
 					timing: { startedAt, elapsedMs },
 				};
 			}
