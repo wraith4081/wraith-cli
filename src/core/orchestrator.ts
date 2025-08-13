@@ -1,6 +1,6 @@
 import { resolveEffectiveModel } from '@models/selection';
 import { OpenAIProvider } from '@provider/openai';
-import type { ChatUsage, IProvider } from '@provider/types';
+import type { ChatMessage, ChatUsage, IProvider } from '@provider/types';
 import { loadUserAndProjectRules } from '@rules/loader';
 import {
 	buildEffectiveSystemPrompt,
@@ -34,6 +34,143 @@ export interface AskOkJson {
 	model: string;
 	usage?: ChatUsage;
 	timing: { startedAt: number; elapsedMs: number };
+}
+export interface ChatTurnResult {
+	content: string;
+	model: string;
+	usage?: ChatUsage;
+	aborted?: boolean;
+	timing: { startedAt: number; elapsedMs: number };
+}
+
+export interface ChatSession {
+	model: string;
+	profile?: string;
+	history: ChatMessage[]; // includes system as [0]
+	addUser(content: string): void;
+	runAssistant(
+		onDelta?: (s: string) => void,
+		signal?: AbortSignal
+	): Promise<ChatTurnResult>;
+}
+
+export interface StartChatOptions {
+	modelFlag?: string;
+	profileFlag?: string;
+}
+
+export interface StartChatDeps {
+	provider?: IProvider;
+	config?: unknown;
+}
+
+export function startChatSession(
+	opts: StartChatOptions = {},
+	deps: StartChatDeps = {}
+): ChatSession {
+	const mergedConfig = deps.config ?? loadConfig().merged;
+	const selection = resolveEffectiveModel({
+		config: mergedConfig,
+		explicitModel: opts.modelFlag,
+		explicitProfile: opts.profileFlag,
+	});
+
+	const provider: IProvider = deps.provider ?? new OpenAIProvider();
+
+	const { userSections, projectSections } = loadUserAndProjectRules({
+		config: mergedConfig,
+		profileName: selection.profile,
+		overLimitBehavior: 'summarize',
+		maxChars: 16_000,
+	});
+
+	const systemPrompt = buildEffectiveSystemPrompt({
+		defaultPrompt: getDefaultSystemPrompt(),
+		userSections,
+		projectSections,
+	});
+
+	// Seed with system message
+	const history: ChatMessage[] = [{ role: 'system', content: systemPrompt }];
+
+	const session: ChatSession = {
+		model: selection.modelId,
+		profile: selection.profile,
+		history,
+
+		addUser(content: string) {
+			if (content.trim().length === 0) {
+				return;
+			}
+			history.push({ role: 'user', content });
+		},
+
+		async runAssistant(
+			onDelta?: (s: string) => void,
+			signal?: AbortSignal
+		): Promise<ChatTurnResult> {
+			const startedAt = Date.now();
+			let acc = '';
+			let aborted = false;
+
+			try {
+				const res = await provider.streamChat(
+					{
+						model: selection.modelId,
+						messages: history,
+					},
+					(d) => {
+						if (
+							typeof d.content === 'string' &&
+							d.content.length > 0
+						) {
+							acc += d.content;
+							if (onDelta) {
+								onDelta(d.content);
+							}
+						}
+					},
+					signal
+				);
+
+				const elapsedMs = Date.now() - startedAt;
+				const content = acc.length > 0 ? acc : (res.content ?? '');
+
+				// Persist assistant message
+				history.push({ role: 'assistant', content });
+
+				return {
+					content,
+					model: selection.modelId,
+					usage: res.usage,
+					aborted: false,
+					timing: { startedAt, elapsedMs },
+				};
+			} catch {
+				// Treat abort/timeouts as partial success if we streamed tokens
+				const elapsedMs = Date.now() - startedAt;
+				aborted = true;
+
+				// Record whatever we have so far to keep session consistent
+				const content = acc;
+
+				// Persist assistant message even if partial, so the session context reflects what user saw
+				if (content.length > 0) {
+					history.push({ role: 'assistant', content });
+				}
+
+				return {
+					content,
+					model: selection.modelId,
+					usage: undefined,
+					aborted,
+					timing: { startedAt, elapsedMs },
+				};
+			}
+		},
+	};
+
+	return session;
 }
 
 export async function runAsk(
