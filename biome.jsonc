@@ -12,7 +12,8 @@
       },
       "style": {
         "noParameterProperties": "off",
-        "noNestedTernary": "off"
+        "noNestedTernary": "off",
+        "useConsistentMemberAccessibility": "off"
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": "off"

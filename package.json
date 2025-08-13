@@ -30,6 +30,7 @@
     "@qdrant/js-client-rest": "^1.15.0",
     "@types/pg": "^8.15.5",
     "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "apache-arrow": "^21.0.0",
     "commander": "^14.0.0",
     "diff": "^8.0.2",

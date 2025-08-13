@@ -20,7 +20,8 @@
       "@core/*": ["src/core/*"],
       "@rules/*": ["src/rules/*"],
       "@ingest/*": ["src/ingest/*"],
-      "@rag/*": ["src/rag/*"]
+      "@rag/*": ["src/rag/*"],
+      "@tools/*": ["src/tools/*"]
     }
   },
   "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]

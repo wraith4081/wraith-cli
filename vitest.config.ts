@@ -22,6 +22,7 @@ export default defineConfig({
 			'@rules': path.resolve(__dirname, 'src/rules'),
 			'@ingest': path.resolve(__dirname, 'src/ingest'),
 			'@rag': path.resolve(__dirname, 'src/rag'),
+			'@tools': path.resolve(__dirname, 'src/tools'),
 		},
 	},
 });
