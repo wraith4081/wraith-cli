@@ -38,7 +38,6 @@ export interface ColdIndexDriver {
 	): Promise<Array<{ score: number; chunk: ChunkEmbedding }>>;
 }
 
-// New: minimal cold index driver contract for 7.x
 export interface ColdIndexDriver {
 	init(): Promise<void>;
 	upsert(chunks: ChunkEmbedding[]): Promise<number>;

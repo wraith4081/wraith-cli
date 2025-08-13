@@ -17,29 +17,20 @@ interface QdrantClientLike {
 	};
 	points: {
 		upsert(name: string, payload: unknown): Promise<{ result?: unknown }>;
-		search(name: string, payload: unknown): Promise<{ result: unknown[] }>;
+		search(
+			name: string,
+			payload: unknown
+		): Promise<{ result: Record<string, unknown>[] }>;
 		delete(name: string, payload: unknown): Promise<{ result?: unknown }>;
 	};
 }
 
 export interface QdrantDriverOptions {
-	/**
-	 * Qdrant base URL, e.g. http://localhost:6333 or https://cluster-xxx.qdrant.io
-	 * Defaults to local dev at 6333.
-	 */
 	url?: string;
-	/** API key if your instance enforces auth */
 	apiKey?: string;
-	/** Collection name; created on demand if missing */
 	collection?: string;
-	/** Vector distance; Qdrant supports "Cosine" | "Dot" | "Euclid" */
 	distance?: 'Cosine' | 'Dot' | 'Euclid';
-	/**
-	 * Expected vector dimension. If not provided, we infer from first upsert().
-	 * (Search before the first upsert will no-op if collection doesn't exist.)
-	 */
 	dim?: number;
-	/** Internal: injectable client ctor for tests */
 	connectImpl?: QdrantClientFactory;
 }
 
@@ -49,7 +40,7 @@ const DEFAULTS = {
 	distance: 'Cosine' as const,
 };
 
-function buildModelFilter(model?: string) {
+function buildModelFilter(model?: string): Record<string, unknown> | undefined {
 	if (!model) {
 		return;
 	}
@@ -63,23 +54,23 @@ export class QdrantDriver implements ColdIndexDriver {
 
 	constructor(opts: QdrantDriverOptions = {}) {
 		this.opts = { ...DEFAULTS, ...opts };
-		// Just touching coldIndexDir ensures parent exists in repo structure;
-		// Qdrant is remote, so we don't write here, but it's handy for parity/logs.
-		coldIndexDir;
+		// Touch for parity/logging; qdrant is remote
+		void coldIndexDir;
 	}
 
 	async init(): Promise<void> {
 		if (!this.client) {
 			const mk = this.opts.connectImpl ?? (await this.lazyLoadClient());
 			this.client = await mk({
-				url: this.opts.url ?? 'http://localhost:6333',
+				url: this.opts.url ?? DEFAULTS.url,
 				apiKey: this.opts.apiKey,
 			});
 		}
 
-		// Probe collection existence once; we may also create lazily during first upsert
 		try {
-			await this.client.collections.get(this.opts.collection ?? '');
+			await this.client.collections.get(
+				this.opts.collection ?? DEFAULTS.collection
+			);
 			this.haveCollection = true;
 		} catch {
 			this.haveCollection = false;
@@ -99,7 +90,7 @@ export class QdrantDriver implements ColdIndexDriver {
 		}
 
 		const points = chunks.map((c) => ({
-			id: c.id, // string ids are fine
+			id: c.id,
 			vector: c.vector,
 			payload: {
 				model: c.model,
@@ -111,10 +102,13 @@ export class QdrantDriver implements ColdIndexDriver {
 			},
 		}));
 
-		await this.client?.points.upsert(this.opts.collection ?? '', {
-			wait: true,
-			points,
-		});
+		await this.client?.points.upsert(
+			this.opts.collection ?? DEFAULTS.collection,
+			{
+				wait: true,
+				points,
+			}
+		);
 
 		return points.length;
 	}
@@ -129,7 +123,6 @@ export class QdrantDriver implements ColdIndexDriver {
 	): Promise<RetrievedChunk[]> {
 		await this.init();
 		if (!this.haveCollection) {
-			// no collection => nothing to return
 			return [];
 		}
 
@@ -137,7 +130,7 @@ export class QdrantDriver implements ColdIndexDriver {
 		const filter = buildModelFilter(opts.modelFilter);
 
 		const res = await this.client?.points.search(
-			this.opts.collection ?? '',
+			this.opts.collection ?? DEFAULTS.collection,
 			{
 				vector: queryVector,
 				with_payload: true,
@@ -148,19 +141,14 @@ export class QdrantDriver implements ColdIndexDriver {
 		);
 
 		const out: RetrievedChunk[] = [];
-		for (const r of (res?.result ?? []) as {
-			id: string;
-			payload: Record<string, unknown>;
-			vector: number[];
-			score: number;
-		}[]) {
-			const id = String(r?.id);
-			const payload = (r?.payload ?? {}) as Record<string, unknown>;
+		for (const r of res?.result ?? []) {
+			const id = String(r.id);
+			const payload = (r.payload ?? {}) as Record<string, unknown>;
 			const vector: number[] = Array.isArray(r.vector)
 				? (r.vector as number[])
 				: [];
-			const score: number | undefined =
-				typeof r?.score === 'number' ? (r.score as number) : undefined;
+			const score =
+				typeof r.score === 'number' ? (r.score as number) : undefined;
 
 			const filePath = String(payload.filePath ?? '');
 			const startLine = Number(payload.startLine ?? 1);
@@ -214,10 +202,13 @@ export class QdrantDriver implements ColdIndexDriver {
 			return 0;
 		}
 
-		await this.client?.points.delete(this.opts.collection ?? '', {
-			points: ids,
-			wait: true,
-		});
+		await this.client?.points.delete(
+			this.opts.collection ?? DEFAULTS.collection,
+			{
+				points: ids,
+				wait: true,
+			}
+		);
 		return ids.length;
 	}
 
@@ -227,15 +218,17 @@ export class QdrantDriver implements ColdIndexDriver {
 
 	private async ensureCollection(dim: number) {
 		try {
-			await this.client?.collections.create(this.opts.collection ?? '', {
-				vectors: {
-					size: dim,
-					distance: this.opts.distance ?? 'Cosine',
-				},
-			});
+			await this.client?.collections.create(
+				this.opts.collection ?? DEFAULTS.collection,
+				{
+					vectors: {
+						size: dim,
+						distance: this.opts.distance ?? DEFAULTS.distance,
+					},
+				}
+			);
 			this.haveCollection = true;
 		} catch {
-			// If a race created it meanwhile, mark as available and continue
 			this.haveCollection = true;
 		}
 	}

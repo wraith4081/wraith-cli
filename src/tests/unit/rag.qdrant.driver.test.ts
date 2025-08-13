@@ -2,34 +2,33 @@ import { QdrantDriver } from '@rag/drivers/qdrant';
 import type { ChunkEmbedding } from '@rag/types';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-type Point = { id: string; vector: number[]; payload: unknown };
+type Point = { id: string; vector: number[]; payload: Record<string, unknown> };
 
 class FakeClient {
-	collectionsData = new Map<string, unknown>();
-
-	private _cols = new Map<
+	private cols = new Map<
 		string,
 		{ config: unknown; points: Map<string, Point> }
 	>();
 
-	require(name: string) {
-		const c = this._cols.get(name);
+	private require(name: string) {
+		const c = this.cols.get(name);
 		if (!c) {
 			throw new Error('missing collection');
 		}
 		return c;
 	}
+
 	collections = {
 		get: (name: string) => {
-			const c = this._cols.get(name);
+			const c = this.cols.get(name);
 			if (!c) {
 				throw new Error('not found');
 			}
 			return { result: c.config };
 		},
 		create: (name: string, payload: unknown) => {
-			if (!this._cols.has(name)) {
-				this._cols.set(name, {
+			if (!this.cols.has(name)) {
+				this.cols.set(name, {
 					config: payload,
 					points: new Map<string, Point>(),
 				});
@@ -37,13 +36,9 @@ class FakeClient {
 			return { result: { created: true } };
 		},
 	};
+
 	points = {
-		upsert: (
-			name: string,
-			payload: {
-				points: Point[];
-			}
-		) => {
+		upsert: (name: string, payload: { points: Point[] }) => {
 			const c = this.require(name);
 			for (const p of payload.points) {
 				c.points.set(String(p.id), {
@@ -52,9 +47,7 @@ class FakeClient {
 					payload: { ...(p.payload ?? {}) },
 				});
 			}
-			return {
-				result: { upserted: payload.points.length },
-			};
+			return { result: { upserted: payload.points.length } };
 		},
 		search: (
 			name: string,
@@ -62,32 +55,22 @@ class FakeClient {
 				limit?: number;
 				vector: number[];
 				filter?: {
-					must?: {
-						key: string;
-						match: {
-							value: string;
-						};
-					}[];
+					must?: Array<{ key: string; match: { value: string } }>;
 				};
 				with_vector?: boolean;
-				model?: string;
 			}
 		) => {
 			const c = this.require(name);
 			const qv: number[] = payload.vector;
-			const limit: number = payload.limit ?? 10;
-			const filter = payload.filter;
-			const mustModel = filter?.must?.find((m) => m.key === 'model')
-				?.match?.value as string | undefined;
+			const limit = Number(payload.limit ?? 10);
+			const mustModel = payload.filter?.must?.find(
+				(m) => m.key === 'model'
+			)?.match.value;
 
 			const scored = Array.from(c.points.values())
 				.filter((p) =>
 					mustModel
-						? (
-								p.payload as {
-									model?: string;
-								}
-							)?.model === mustModel
+						? String(p.payload.model ?? '') === mustModel
 						: true
 				)
 				.map((p) => ({ ...p, score: cosine(qv, p.vector) }))
@@ -102,12 +85,7 @@ class FakeClient {
 
 			return { result: scored };
 		},
-		delete: (
-			name: string,
-			payload: {
-				points: (string | number)[];
-			}
-		) => {
+		delete: (name: string, payload: { points: Array<string | number> }) => {
 			const c = this.require(name);
 			for (const id of payload.points) {
 				c.points.delete(String(id));
@@ -118,12 +96,12 @@ class FakeClient {
 }
 
 function cosine(a: number[], b: number[]): number {
-	let dot = 0,
-		na = 0,
-		nb = 0;
+	let dot = 0;
+	let na = 0;
+	let nb = 0;
 	for (let i = 0; i < Math.max(a.length, b.length); i++) {
-		const x = a[i] ?? 0,
-			y = b[i] ?? 0;
+		const x = a[i] ?? 0;
+		const y = b[i] ?? 0;
 		dot += x * y;
 		na += x * x;
 		nb += y * y;
@@ -132,7 +110,6 @@ function cosine(a: number[], b: number[]): number {
 	return den > 0 ? dot / den : 0;
 }
 
-// helper to create chunks
 function chunk(
 	id: string,
 	vec: number[],
@@ -168,8 +145,12 @@ describe('QdrantDriver (mocked client)', () => {
 		driver = new QdrantDriver({
 			url: 'http://fake:6333',
 			collection: 'wraith_chunks_test',
-			// biome-ignore lint/suspicious/noExplicitAny: tbd
-			connectImpl: async () => new (FakeClient as any)(),
+			connectImpl: async () =>
+				new FakeClient() as unknown as {
+					collections: QdrantDriver extends Record<string, unknown>
+						? never
+						: unknown; // unused, only for shape
+				},
 		});
 	});
 
@@ -180,7 +161,7 @@ describe('QdrantDriver (mocked client)', () => {
 		expect(hits.length).toBe(1);
 		expect(hits[0].chunk.id).toBe('a');
 		expect((hits[0].score ?? 0) > 0.99).toBeTruthy();
-		expect(hits[0].chunk.vector.length).toBe(3); // with_vector=true
+		expect(hits[0].chunk.vector.length).toBe(3);
 	});
 
 	it('respects model filter and score threshold', async () => {

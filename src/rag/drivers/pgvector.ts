@@ -6,7 +6,10 @@ import type {
 
 /** Minimal PG client shape so we can inject a mock in tests */
 type PgClientLike = {
-	query: (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
+	query: (
+		text: string,
+		params?: unknown[]
+	) => Promise<{ rows: Record<string, unknown>[] }>;
 };
 
 type PgConnectFactory = (opts: {
@@ -16,7 +19,7 @@ type PgConnectFactory = (opts: {
 	user?: string;
 	password?: string;
 	database?: string;
-	ssl?: boolean | object;
+	ssl?: boolean | Record<string, unknown>;
 }) => Promise<PgClientLike>;
 
 export type PgDistance = 'cosine' | 'l2' | 'ip';
@@ -28,7 +31,7 @@ export interface PgVectorDriverOptions {
 	user?: string;
 	password?: string;
 	database?: string;
-	ssl?: boolean | object;
+	ssl?: boolean | Record<string, unknown>;
 
 	/** schema and table names; defaults to public.wraith_chunks */
 	schema?: string;
@@ -70,21 +73,18 @@ function opFor(distance: PgDistance): {
 } {
 	switch (distance) {
 		case 'cosine':
-			// <=> returns cosine distance in [0,2]; typical normalized vectors -> [0,2], with 0 == identical
 			return {
 				op: '<=>',
 				opclass: 'vector_cosine_ops',
 				toSimilarity: (d) => 1 - d,
 			};
 		case 'ip':
-			// <#> returns NEGATIVE inner product; smaller is better; sim = -distance
 			return {
 				op: '<#>',
 				opclass: 'vector_ip_ops',
 				toSimilarity: (d) => -d,
 			};
 		default:
-			// <-> returns euclidean distance; convert to [0,1) via 1/(1+d)
 			return {
 				op: '<->',
 				opclass: 'vector_l2_ops',
@@ -94,7 +94,6 @@ function opFor(distance: PgDistance): {
 }
 
 function vecToPgLiteral(vec: number[]): string {
-	// pgvector accepts text form: '[1,2,3]'
 	return `[${vec.join(',')}]`;
 }
 
@@ -143,13 +142,12 @@ export class PgVectorDriver implements ColdIndexDriver {
 			});
 		}
 		if (!this.haveTable) {
-			// Probe table existence; if it fails, we'll lazily create on first upsert
 			try {
 				await this.client.query(
 					'SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2',
 					[this.opts.schema, this.opts.table]
 				);
-				this.haveTable = true; // probe succeeded either way (no throw)
+				this.haveTable = true;
 			} catch {
 				this.haveTable = false;
 			}
@@ -162,7 +160,6 @@ export class PgVectorDriver implements ColdIndexDriver {
 		}
 		await this.init();
 
-		// Ensure schema/table if needed (and infer dim if missing)
 		const dim = this.dim ?? chunks[0].dim ?? chunks[0].vector.length;
 		if (!this.haveTable) {
 			await this.ensureSchema(dim);
@@ -182,17 +179,17 @@ export class PgVectorDriver implements ColdIndexDriver {
 		]);
 
 		const text = `
-            INSERT INTO "${schema}"."${table}" (id, vector, model, "filePath", "startLine", "endLine", dim, "tokensEstimated")
-            VALUES ${rows.map((_, i) => `($${i * 8 + 1}, $${i * 8 + 2}::vector, $${i * 8 + 3}, $${i * 8 + 4}, $${i * 8 + 5}, $${i * 8 + 6}, $${i * 8 + 7}, $${i * 8 + 8})`).join(',')}
-            ON CONFLICT (id) DO UPDATE SET
-                vector = EXCLUDED.vector,
-                model = EXCLUDED.model,
-                "filePath" = EXCLUDED."filePath",
-                "startLine" = EXCLUDED."startLine",
-                "endLine" = EXCLUDED."endLine",
-                dim = EXCLUDED.dim,
-                "tokensEstimated" = EXCLUDED."tokensEstimated";
-        `;
+			INSERT INTO "${schema}"."${table}" (id, vector, model, "filePath", "startLine", "endLine", dim, "tokensEstimated")
+			VALUES ${rows.map((_, i) => `($${i * 8 + 1}, $${i * 8 + 2}::vector, $${i * 8 + 3}, $${i * 8 + 4}, $${i * 8 + 5}, $${i * 8 + 6}, $${i * 8 + 7}, $${i * 8 + 8})`).join(',')}
+			ON CONFLICT (id) DO UPDATE SET
+				vector = EXCLUDED.vector,
+				model = EXCLUDED.model,
+				"filePath" = EXCLUDED."filePath",
+				"startLine" = EXCLUDED."startLine",
+				"endLine" = EXCLUDED."endLine",
+				dim = EXCLUDED.dim,
+				"tokensEstimated" = EXCLUDED."tokensEstimated";
+		`;
 
 		const params = rows.flat();
 		await this.client?.query(text, params);
@@ -210,26 +207,23 @@ export class PgVectorDriver implements ColdIndexDriver {
 		await this.init();
 		const { schema, table } = this.opts;
 
-		// If table doesn't exist yet, just return empty
 		if (!this.haveTable) {
 			return [];
 		}
 
 		const { op, toSimilarity } = opFor(this.opts.distance ?? 'cosine');
 		const limit = Math.max(1, opts.topK ?? 8);
-
 		const where =
 			typeof opts.modelFilter === 'string' ? 'WHERE model = $2' : '';
 
 		const text = `
-            SELECT id, model, "filePath", "startLine", "endLine", dim, "tokensEstimated",
-                    vector,
-                    (vector ${op} $1::vector) AS d
-                FROM "${schema}"."${table}"
-                ${where}
-                ORDER BY d ASC
-                LIMIT $${where ? 3 : 2};
-        `;
+			SELECT id, model, "filePath", "startLine", "endLine", dim, "tokensEstimated",
+			       vector, (vector ${op} $1::vector) AS d
+			FROM "${schema}"."${table}"
+			${where}
+			ORDER BY d ASC
+			LIMIT $${where ? 3 : 2};
+		`;
 
 		const params: unknown[] = [vecToPgLiteral(queryVector)];
 		if (where) {
@@ -237,18 +231,21 @@ export class PgVectorDriver implements ColdIndexDriver {
 		}
 		params.push(limit);
 
-		let rows: unknown[] = [];
+		let rows: Record<string, unknown>[] = [];
 		try {
 			const res = await this.client?.query(text, params);
 			rows = res?.rows ?? [];
 		} catch {
-			// If the table truly doesn't exist (e.g., init race), act like empty
 			return [];
 		}
 
 		const out: RetrievedChunk[] = [];
 		for (const r of rows) {
-			const distance = Number(r.d ?? r.distance ?? 0);
+			const distance = Number(
+				(r.d as number | undefined) ??
+					(r.distance as number | undefined) ??
+					0
+			);
 			const score = toSimilarity(distance);
 			if (
 				typeof opts.scoreThreshold === 'number' &&
@@ -260,12 +257,27 @@ export class PgVectorDriver implements ColdIndexDriver {
 			const vec = parsePgVector(r.vector);
 			const id = String(r.id);
 			const model = String(r.model ?? '');
-			const filePath = String(r.filePath ?? r.filepath ?? '');
-			const startLine = Number(r.startLine ?? r.startline ?? 1);
-			const endLine = Number(r.endLine ?? r.endline ?? 1);
+			const filePath = String(
+				(r as { filePath?: string; filepath?: string }).filePath ??
+					(r as { filepath?: string }).filepath ??
+					''
+			);
+			const startLine = Number(
+				(r as { startLine?: number; startline?: number }).startLine ??
+					(r as { startline?: number }).startline ??
+					1
+			);
+			const endLine = Number(
+				(r as { endLine?: number; endline?: number }).endLine ??
+					(r as { endline?: number }).endline ??
+					1
+			);
 			const dim = Number(r.dim ?? vec.length ?? 0);
 			const tokensEstimated = Number(
-				r.tokensEstimated ?? r.tokensestimated ?? 0
+				(r as { tokensEstimated?: number; tokensestimated?: number })
+					.tokensEstimated ??
+					(r as { tokensestimated?: number }).tokensestimated ??
+					0
 			);
 
 			out.push({
@@ -312,27 +324,26 @@ export class PgVectorDriver implements ColdIndexDriver {
 	}
 
 	async close(): Promise<void> {
-		// If we ever switch to pg.Pool with .end(), we can call it here.
+		// Pool end() would go here if we switch to it later.
 	}
 
 	private async ensureSchema(dim: number) {
 		const { schema, table, createAnnIndex, ivfLists } = this.opts;
 		const { opclass } = opFor(this.opts.distance ?? 'cosine');
 
-		// Extension + table + indexes (best-effort; safe to run multiple times)
 		await this.client?.query('CREATE EXTENSION IF NOT EXISTS vector;');
 		await this.client?.query(`CREATE SCHEMA IF NOT EXISTS "${schema}";`);
 		await this.client?.query(
 			`CREATE TABLE IF NOT EXISTS "${schema}"."${table}" (
-                id TEXT PRIMARY KEY,
-                vector vector(${dim}) NOT NULL,
-                model TEXT NOT NULL,
-                "filePath" TEXT NOT NULL,
-                "startLine" INT NOT NULL,
-                "endLine" INT NOT NULL,
-                dim INT NOT NULL,
-                "tokensEstimated" INT NOT NULL
-            );`
+				id TEXT PRIMARY KEY,
+				vector vector(${dim}) NOT NULL,
+				model TEXT NOT NULL,
+				"filePath" TEXT NOT NULL,
+				"startLine" INT NOT NULL,
+				"endLine" INT NOT NULL,
+				dim INT NOT NULL,
+				"tokensEstimated" INT NOT NULL
+			);`
 		);
 		await this.client?.query(
 			`CREATE INDEX IF NOT EXISTS "${table}_model_idx" ON "${schema}"."${table}" (model);`
@@ -340,8 +351,8 @@ export class PgVectorDriver implements ColdIndexDriver {
 		if (createAnnIndex) {
 			await this.client?.query(
 				`CREATE INDEX IF NOT EXISTS "${table}_vector_ivfflat_idx"
-                    ON "${schema}"."${table}" USING ivfflat (vector ${opclass})
-                    WITH (lists = ${Math.max(1, ivfLists ?? 100)});`
+				 ON "${schema}"."${table}" USING ivfflat (vector ${opclass})
+				 WITH (lists = ${Math.max(1, ivfLists ?? 100)});`
 			);
 		}
 
@@ -353,12 +364,12 @@ export class PgVectorDriver implements ColdIndexDriver {
 		// dynamic import; only load when driver is used
 		const pg = (await import('pg')) as {
 			Pool: new (
-				cfg: unknown
+				cfg: Record<string, unknown>
 			) => {
 				query: (
 					text: string,
 					params?: unknown[]
-				) => Promise<{ rows: unknown[] }>;
+				) => Promise<{ rows: Record<string, unknown>[] }>;
 			};
 		};
 		return async (opts) => {
@@ -372,7 +383,6 @@ export class PgVectorDriver implements ColdIndexDriver {
 				database: opts.database,
 				ssl: opts.ssl,
 			});
-			// Return the subset we need
 			return await Promise.resolve({
 				query: (text: string, params?: unknown[]) =>
 					pool.query(text, params),

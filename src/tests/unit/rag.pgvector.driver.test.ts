@@ -1,5 +1,5 @@
 import { type PgDistance, PgVectorDriver } from '@rag/drivers/pgvector';
-import type { ChunkEmbedding } from '@rag/types';
+import type { ChunkEmbedding, RetrievedChunk } from '@rag/types';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 // --- Tiny in-memory PG mock ---
@@ -13,14 +13,10 @@ type Row = {
 	dim: number;
 	tokensEstimated: number;
 };
+
 class FakePg {
-	schema = 'public';
-	table = 'wraith_chunks';
-	haveExt = false;
-	haveSchema = false;
-	haveTable = false;
 	rows = new Map<string, Row>();
-	distance: PgDistance = 'cosine';
+	distance: PgDistance;
 
 	constructor(distance: PgDistance) {
 		this.distance = distance;
@@ -31,8 +27,7 @@ class FakePg {
 
 		// Probes
 		if (/information_schema\.tables/i.test(sql)) {
-			// return empty; driver interprets success of query (no throw) as "probed"
-			return { rows: [] };
+			return { rows: [] as unknown[] as Record<string, unknown>[] };
 		}
 
 		// CREATE EXTENSION/SCHEMA/TABLE/INDEX — accept silently
@@ -42,26 +37,13 @@ class FakePg {
 			/^create table/i.test(sql) ||
 			/^create index/i.test(sql)
 		) {
-			if (/create schema/i.test(sql)) {
-				this.haveSchema = true;
-			}
-			if (/create extension/i.test(sql)) {
-				this.haveExt = true;
-			}
-			if (/create table/i.test(sql)) {
-				this.haveTable = true;
-			}
-			return { rows: [] };
+			return { rows: [] as unknown[] as Record<string, unknown>[] };
 		}
 
 		// INSERT ... ON CONFLICT (id) DO UPDATE
 		if (/^insert into/i.test(sql)) {
-			const valuesMatches = sql.match(/values\s+(.+)\s+on conflict/i);
-			if (!valuesMatches) {
-				throw new Error('bad insert');
-			}
-			const chunkParams = chunk(params, 8);
-			for (const vals of chunkParams) {
+			const chunks = chunk(params, 8);
+			for (const vals of chunks) {
 				const [
 					id,
 					vecTxt,
@@ -83,24 +65,24 @@ class FakePg {
 					dim: Number(dim),
 					tokensEstimated: Number(tok),
 				};
-				this.rows.set(row.id, row); // upsert
+				this.rows.set(row.id, row);
 			}
-			return { rows: [] };
+			return { rows: [] as unknown[] as Record<string, unknown>[] };
 		}
 
 		// DELETE
 		if (/^delete from/i.test(sql)) {
-			const ids: string[] = params[0] ?? [];
+			const ids: string[] = (params[0] as string[]) ?? [];
 			for (const id of ids) {
 				this.rows.delete(String(id));
 			}
-			return { rows: [] };
+			return { rows: [] as unknown[] as Record<string, unknown>[] };
 		}
 
 		// SELECT ... ORDER BY d LIMIT
 		if (/^select/i.test(sql)) {
-			const vecTxt = params[0];
-			const qv = parseVecText(String(vecTxt));
+			const vecTxt = params[0] as string;
+			const qv = parseVecText(vecTxt);
 			let modelFilter: string | undefined;
 			let limit = 10;
 			if (/where model = \$2/i.test(sql)) {
@@ -113,7 +95,7 @@ class FakePg {
 			const scored = Array.from(this.rows.values())
 				.filter((r) => (modelFilter ? r.model === modelFilter : true))
 				.map((r) => ({ r, d: this.distanceOf(r.vector, qv) }))
-				.sort((a, b) => a.d - b.d) // ASC (smaller distance first)
+				.sort((a, b) => a.d - b.d)
 				.slice(0, limit)
 				.map(({ r, d }) => ({
 					id: r.id,
@@ -123,11 +105,13 @@ class FakePg {
 					endLine: r.endLine,
 					dim: r.dim,
 					tokensEstimated: r.tokensEstimated,
-					vector: r.vector, // we return array directly
+					vector: r.vector,
 					d,
 				}));
 
-			return { rows: scored };
+			return {
+				rows: scored as unknown as Record<string, unknown>[],
+			};
 		}
 
 		throw new Error(`Unrecognized SQL in fake PG:\n${sql}`);
@@ -139,7 +123,6 @@ class FakePg {
 				return cosineDist(a, b);
 			}
 			case 'ip': {
-				// pgvector uses negative inner product as distance (<#>)
 				return -dot(a, b);
 			}
 			default: {
@@ -220,16 +203,15 @@ function makeChunk(
 
 // --- Tests ---
 describe('PgVectorDriver (mocked pg)', () => {
-	let connectImpl: (d: PgDistance) => unknown;
+	let connectImpl: (d: PgDistance) => () => Promise<FakePg>;
 
 	beforeEach(() => {
-		connectImpl = (d: PgDistance) => async () => new FakePg(d) as unknown;
+		connectImpl = (d: PgDistance) => async () => new FakePg(d);
 	});
 
 	it('creates table on first upsert and returns nearest neighbors (cosine)', async () => {
 		const driver = new PgVectorDriver({
-			// biome-ignore lint/suspicious/noExplicitAny: tbd
-			connectImpl: connectImpl('cosine') as any,
+			connectImpl: connectImpl('cosine'),
 			distance: 'cosine',
 		});
 
@@ -246,8 +228,7 @@ describe('PgVectorDriver (mocked pg)', () => {
 
 	it('respects model filter and scoreThreshold (l2)', async () => {
 		const driver = new PgVectorDriver({
-			// biome-ignore lint/suspicious/noExplicitAny: tbd
-			connectImpl: connectImpl('l2') as any,
+			connectImpl: connectImpl('l2'),
 			distance: 'l2',
 		});
 
@@ -262,21 +243,20 @@ describe('PgVectorDriver (mocked pg)', () => {
 			topK: 10,
 			scoreThreshold: 0.7,
 		});
-		const ids = hits.map((h) => h.chunk.id);
+		const ids = hits.map((h: RetrievedChunk) => h.chunk.id);
 		expect(ids).toContain('mA');
 		expect(ids).not.toContain('mB');
-		expect(ids).not.toContain('far'); // 1/(1+dist) too small
+		expect(ids).not.toContain('far');
 	});
 
 	it('upsert replaces existing id and deleteByIds removes points (ip)', async () => {
 		const driver = new PgVectorDriver({
-			// biome-ignore lint/suspicious/noExplicitAny: tbd
-			connectImpl: connectImpl('ip') as any,
+			connectImpl: connectImpl('ip'),
 			distance: 'ip',
 		});
 
 		await driver.upsert([makeChunk('x', [0, 1], 'M')]);
-		await driver.upsert([makeChunk('x', [1, 0], 'M')]); // replace
+		await driver.upsert([makeChunk('x', [1, 0], 'M')]);
 
 		const top = await driver.search([1, 0], { topK: 1 });
 		expect(top[0].chunk.id).toBe('x');

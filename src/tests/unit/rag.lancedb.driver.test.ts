@@ -3,19 +3,34 @@ import type { ChunkEmbedding } from '@rag/types';
 import { beforeEach, expect, test } from 'vitest';
 
 // --- simple in-memory fake LanceDB ---
-type Row = any;
+type Row = {
+	id: string;
+	vector: number[];
+	model?: string;
+	filePath?: string;
+	startLine?: number;
+	endLine?: number;
+	dim?: number;
+	tokensEstimated?: number;
+};
+
 class FakeTable {
 	rows = new Map<string, Row>();
+
 	add(data: Row[]) {
 		let n = 0;
 		for (const r of data) {
-			if (!this.rows.has(r.id)) n++;
+			if (!this.rows.has(r.id)) {
+				n++;
+			}
 			this.rows.set(r.id, r);
 		}
 		return n;
 	}
-	mergeInsert(on: string, data: Row[], _args: any) {
-		for (const r of data) this.rows.set(r[on], r);
+	mergeInsert(on: string, data: Row[]) {
+		for (const r of data) {
+			this.rows.set(String((r as Record<string, unknown>)[on]), r);
+		}
 	}
 	search(vec: number[]) {
 		const self = this;
@@ -23,9 +38,10 @@ class FakeTable {
 		let lim = 10;
 		const api = {
 			where(pred: string) {
-				// very tiny parser for: model = 'xxx'
 				const m = /model\s*=\s*'([^']+)'/.exec(pred);
-				if (m) where = (r: Row) => String(r.model) === m[1];
+				if (m) {
+					where = (r: Row) => String(r.model) === m[1];
+				}
 				return api;
 			},
 			limit(k: number) {
@@ -52,24 +68,26 @@ class FakeDB {
 	tables = new Map<string, FakeTable>();
 	openTable(name: string) {
 		const t = this.tables.get(name);
-		if (!t) throw new Error('missing');
+		if (!t) {
+			throw new Error('missing');
+		}
 		return t;
 	}
-	createEmptyTable(name: string, _schema: any) {
+	createEmptyTable(name: string) {
 		const t = new FakeTable();
 		this.tables.set(name, t);
 		return t;
 	}
-	createTable(name: string, _data: any) {
+	createTable(name: string) {
 		const t = new FakeTable();
 		this.tables.set(name, t);
 		return t;
 	}
 }
 function cosine(a: number[], b: number[]): number {
-	let dot = 0,
-		na = 0,
-		nb = 0;
+	let dot = 0;
+	let na = 0;
+	let nb = 0;
 	for (let i = 0; i < a.length; i++) {
 		const x = a[i] ?? 0;
 		const y = b[i] ?? 0;
@@ -88,9 +106,19 @@ beforeEach(() => {
 	const fake = new FakeDB();
 	driver = new LanceDBDriver({
 		baseDir: '/tmp/lancedb-test',
-		// biome-ignore lint/suspicious/noExplicitAny: tbd
-		connectImpl: async () => fake as any,
-		// supply a no-op schema builder (not used by fake)
+		connectImpl: async () =>
+			fake as unknown as {
+				openTable: (name: string) => Promise<FakeTable>;
+				createEmptyTable: (
+					name: string,
+					schema: unknown,
+					opts?: unknown
+				) => Promise<FakeTable>;
+				createTable: (
+					name: string,
+					data: unknown
+				) => Promise<FakeTable>;
+			},
 		buildArrowSchemaImpl: () => ({}),
 	});
 });
@@ -102,8 +130,8 @@ test('upsert + search returns nearest neighbor', async () => {
 
 	const hits = await driver.search([1, 0, 0], { topK: 1 });
 	expect(hits.length).toBe(1);
-	expect(hits[0].chunk.id).toBe('a');
-	expect((hits[0].score ?? 0) > 0.99).toBeTruthy();
+	expect(hits[0]?.chunk.id).toBe('a');
+	expect((hits[0]?.score ?? 0) > 0.99).toBeTruthy();
 });
 
 test('modelFilter constrains results', async () => {
@@ -122,7 +150,7 @@ test('upsert replaces row with same id', async () => {
 	await driver.upsert([makeChunk('x', [0, 1], 'm')]);
 	await driver.upsert([makeChunk('x', [1, 0], 'm')]); // same id, new vector
 	const hits = await driver.search([1, 0], { topK: 1 });
-	expect(hits[0].chunk.id).toBe('x');
+	expect(hits[0]?.chunk.id).toBe('x');
 });
 
 function makeChunk(id: string, vec: number[], model: string): ChunkEmbedding {
