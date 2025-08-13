@@ -28,6 +28,14 @@ export interface AskResult {
 	timing: { startedAt: number; elapsedMs: number };
 }
 
+export interface AskOkJson {
+	ok: true;
+	answer: string;
+	model: string;
+	usage?: ChatUsage;
+	timing: { startedAt: number; elapsedMs: number };
+}
+
 export async function runAsk(
 	opts: AskOptions,
 	deps: AskDeps = {}

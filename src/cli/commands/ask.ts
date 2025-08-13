@@ -1,174 +1,204 @@
-/** biome-ignore-all lint/suspicious/noConsole: tbd */
-
-import { computeAttachmentSummary } from '@core/context';
-import { runAsk } from '@core/orchestrator';
-import { OpenAIProvider } from '@provider/openai';
+import { type AskResult, runAsk } from '@core/orchestrator';
 import { isProviderError } from '@provider/types';
-import { loadConfig } from '@store/config';
-import type { Command } from 'commander';
 
-export function registerAskCommand(program: Command) {
-	program
-		.command('ask')
-		.description('Single-shot question with streamed response')
-		.argument('<prompt...>', 'Question or instruction')
-		.option('--json', 'Emit JSON {answer, model, usage, timing}')
-		.option('--no-stream', 'Disable token streaming; print once at the end')
-		.option(
-			'--timeout <ms>',
-			'Abort request after <ms> milliseconds',
-			Number.parseInt
-		)
-		.option(
-			'--file <path>',
-			'Attach a file (repeatable)',
-			(val, prev: string[]) => (prev ? [...prev, val] : [val]),
-			[]
-		)
-		.option(
-			'--dir <path>',
-			'Attach a directory (repeatable)',
-			(val, prev: string[]) => (prev ? [...prev, val] : [val]),
-			[]
-		)
-		.option(
-			'--url <link>',
-			'Attach a URL (repeatable)',
-			(val, prev: string[]) => (prev ? [...prev, val] : [val]),
-			[]
-		)
-		.option(
-			'--no-context-summary',
-			'Do not print the pre-send context summary'
-		)
-		.action(
-			async (
-				promptParts: string[],
-				opts: {
-					json?: boolean;
-					noStream?: boolean;
-					timeout?: number;
-					file?: string[];
-					dir?: string[];
-					url?: string[];
-					contextSummary?: boolean; // presence of --no-context-summary sets this false
-				}
-			) => {
-				const prompt = promptParts.join(' ').trim();
-				if (!prompt) {
-					console.error(
-						'Error: prompt is required. Example: ai ask "hello"'
-					);
-					process.exitCode = 1;
-					return;
-				}
+export function formatAskJsonOk(result: AskResult) {
+	return {
+		ok: true as const,
+		answer: result.answer,
+		model: result.model,
+		usage: result.usage ?? null,
+		timing: result.timing,
+	};
+}
 
-				const { merged } = loadConfig();
-				const ac = new AbortController();
-				const signal = ac.signal;
+export function formatAskJsonErr(err: unknown, startedAt: number) {
+	const elapsedMs = Date.now() - startedAt;
+	let code: string | undefined;
+	let status: number | undefined;
+	let message = 'Unknown error';
+	if (isProviderError(err)) {
+		code = err.code;
+		status = err.status;
+		message = err.message;
+	} else if (err instanceof Error) {
+		message = err.message;
+	} else if (typeof err === 'string') {
+		message = err;
+	}
 
-				let timer: NodeJS.Timeout | null = null;
-				const cleanup = () => {
-					if (timer) {
-						clearTimeout(timer);
-					}
-					process.off('SIGINT', onSigint);
-				};
-				const onSigint = () => {
-					ac.abort();
-				};
+	return {
+		ok: false as const,
+		error: { code, status, message },
+		timing: { startedAt, elapsedMs },
+	};
+}
 
-				process.on('SIGINT', onSigint);
-				if (typeof opts.timeout === 'number' && opts.timeout > 0) {
-					timer = setTimeout(() => ac.abort(), opts.timeout);
-				}
+export interface AskCliOptions {
+	prompt: string;
+	modelFlag?: string;
+	profileFlag?: string;
+	json?: boolean;
+	stream?: boolean; // default true unless --no-stream
+}
 
-				const provider = new OpenAIProvider();
-				try {
-					const filePaths = opts.file ?? [];
-					const dirPaths = opts.dir ?? [];
-					const urls = opts.url ?? [];
+export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
+	const startedAt = Date.now();
 
-					// Pre-send context summary (if any attachments present and not suppressed)
-					if (
-						(filePaths.length > 0 ||
-							dirPaths.length > 0 ||
-							urls.length > 0) &&
-						opts.contextSummary !== false &&
-						!opts.json
-					) {
-						const summary = await computeAttachmentSummary({
-							rootDir: process.cwd(),
-							filePaths,
-							dirPaths,
-							urls,
-							config: merged,
-						});
-						for (const line of summary.lines) {
-							process.stdout.write(`$${line}\n`);
-						}
-						process.stdout.write('\n');
-					}
+	// Read prompt from stdin if '-' is passed
+	const prompt =
+		opts.prompt === '-'
+			? await readAllFromStdin()
+			: String(opts.prompt ?? '');
 
-					const globalOpts = program.opts<{
-						model?: string;
-						profile?: string;
-					}>();
-					const onDelta =
-						opts.json || opts.noStream
-							? undefined
-							: (chunk: string) => process.stdout.write(chunk);
+	const wantJson = opts.json === true;
+	const wantStream = opts.stream !== false; // default: stream unless --no-stream
 
-					const { answer, model, usage, timing } = await runAsk(
-						{
-							prompt,
-							modelFlag: globalOpts.model,
-							profileFlag: globalOpts.profile,
-						},
-						{ provider, config: merged, onDelta, signal }
-					);
-
-					if (opts.json) {
-						const payload = { answer, model, usage, timing };
-						console.log(JSON.stringify(payload));
-					} else {
-						if (opts.noStream) {
-							process.stdout.write(answer);
-						}
-						process.stdout.write('\n');
-					}
-				} catch (e) {
-					process.exitCode = 1;
-					if (opts.json) {
-						if (isProviderError(e)) {
-							console.log(
-								JSON.stringify({
-									error: {
-										code: e.code,
-										message: e.message,
-										status: e.status,
-									},
-								})
-							);
-						} else {
-							const msg =
-								e instanceof Error ? e.message : String(e);
-							console.log(
-								JSON.stringify({
-									error: { code: 'E_UNKNOWN', message: msg },
-								})
-							);
-						}
-					} else if (isProviderError(e)) {
-						console.error(`${e.code}: ${e.message}`);
-					} else {
-						console.error(
-							e instanceof Error ? e.message : String(e)
-						);
-					}
-				} finally {
-					cleanup();
-				}
+	try {
+		let streamed = '';
+		const result = await runAsk(
+			{
+				prompt,
+				modelFlag: opts.modelFlag,
+				profileFlag: opts.profileFlag,
+			},
+			{
+				onDelta:
+					wantJson || !wantStream
+						? undefined
+						: (d) => {
+								streamed += d;
+								process.stdout.write(d);
+							},
 			}
 		);
+
+		if (wantJson) {
+			const out = formatAskJsonOk(result);
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 0;
+		}
+
+		// If we didn't stream, print the whole answer now.
+		if (!wantStream || streamed.length === 0) {
+			process.stdout.write(result.answer);
+			if (!result.answer.endsWith('\n')) {
+				process.stdout.write('\n');
+			}
+		}
+		return 0;
+	} catch (err) {
+		if (wantJson) {
+			const out = formatAskJsonErr(err, startedAt);
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 1;
+		}
+		// Human-readable stderr
+		const msg = isProviderError(err)
+			? `[${err.code}${err.status ? ` ${err.status}` : ''}] ${err.message}`
+			: err instanceof Error
+				? err.message
+				: String(err);
+		process.stderr.write(`${msg}\n`);
+		return 1;
+	}
+}
+
+export function registerAskCommand(program: unknown): void {
+	const isSade =
+		typeof (program as { command?: unknown }).command === 'function' &&
+		typeof (program as { option?: unknown }).option === 'function' &&
+		typeof (program as { action?: unknown }).action === 'function';
+
+	const isCommander =
+		typeof (program as { command?: unknown }).command === 'function' &&
+		typeof (program as { description?: unknown }).description ===
+			'function';
+
+	if (isSade) {
+		// biome-ignore lint/suspicious/noExplicitAny: CLI duck-typing
+		const app = program as any;
+		app.command('ask <prompt>')
+			.describe(
+				'Single-shot ask with streaming output (use "-" to read prompt from stdin)'
+			)
+			.option('-m, --model <id>', 'Override model id')
+			.option('-p, --profile <name>', 'Use profile defaults')
+			.option(
+				'--json',
+				'Emit JSON { ok, answer|error, model, usage, timing }'
+			)
+			.option('--no-stream', 'Disable token streaming; print once at end')
+			.action(async (prompt: string, flags: Record<string, unknown>) => {
+				const code = await handleAskCommand({
+					prompt,
+					modelFlag: toOpt(flags.model),
+					profileFlag: toOpt(flags.profile),
+					json: !!flags.json,
+					stream:
+						!(flags as { stream?: boolean }).stream === false
+							? false
+							: (flags as { stream?: boolean }).stream !== false,
+				});
+				process.exitCode = code;
+			});
+		return;
+	}
+
+	if (isCommander) {
+		// biome-ignore lint/suspicious/noExplicitAny: CLI duck-typing
+		const app = program as any;
+		const cmd = app
+			.command('ask <prompt>')
+			.description(
+				'Single-shot ask with streaming output (use "-" to read prompt from stdin)'
+			)
+			.option('-m, --model <id>', 'Override model id')
+			.option('-p, --profile <name>', 'Use profile defaults')
+			.option(
+				'--json',
+				'Emit JSON { ok, answer|error, model, usage, timing }',
+				false
+			)
+			.option(
+				'--no-stream',
+				'Disable token streaming; print once at end',
+				false
+			);
+
+		cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
+			const code = await handleAskCommand({
+				prompt,
+				modelFlag: toOpt(flags.model),
+				profileFlag: toOpt(flags.profile),
+				json: !!flags.json,
+				stream: !(flags as { stream?: boolean }).stream, // commander sets .stream=false when --no-stream is passed
+			});
+			process.exitCode = code;
+		});
+		return;
+	}
+
+	// Fallback: do nothing (caller can use handleAskCommand directly)
+}
+
+function toOpt(v: unknown): string | undefined {
+	return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+
+function readAllFromStdin(): Promise<string> {
+	return new Promise((resolve) => {
+		const chunks: Buffer[] = [];
+		if (process.stdin.isTTY) {
+			// Nothing to read; treat as empty
+			resolve('');
+			return;
+		}
+		process.stdin.on('data', (c) =>
+			chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)))
+		);
+		process.stdin.on('end', () =>
+			resolve(Buffer.concat(chunks).toString('utf8'))
+		);
+		process.stdin.resume();
+	});
 }
