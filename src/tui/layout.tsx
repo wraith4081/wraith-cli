@@ -1,21 +1,28 @@
 import { Box, Text } from 'ink';
 import type React from 'react';
+import { useTheme } from './theme';
 
 export function Section({
 	title,
 	children,
 	focused,
 }: React.PropsWithChildren<{ title: string; focused?: boolean }>) {
+	const { palette } = useTheme();
+	const accent = focused ? palette.accent : 'gray';
 	return (
 		<Box flexDirection="column" paddingX={1} paddingY={0}>
 			<Text>
-				<Text color={focused ? 'cyan' : 'gray'}>── </Text>
-				<Text bold color={focused ? 'cyan' : undefined}>
+				<Text color={accent}>
+					{' '}
+					{palette.dividerGlyph}
+					{palette.dividerGlyph}{' '}
+				</Text>
+				<Text bold color={accent}>
 					{title}
 				</Text>
 				<Text color="gray">
 					{' '}
-					─────────────────────────────────────────
+					{new Array(40).fill(palette.dividerGlyph).join('')}
 				</Text>
 			</Text>
 			<Box flexDirection="column" marginTop={1}>
@@ -26,5 +33,6 @@ export function Section({
 }
 
 export function SmallDim({ children }: React.PropsWithChildren) {
-	return <Text color="gray">{children}</Text>;
+	const { palette } = useTheme();
+	return <Text color={palette.dim}>{children}</Text>;
 }

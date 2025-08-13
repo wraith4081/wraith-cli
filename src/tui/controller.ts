@@ -1,4 +1,5 @@
 import type { TuiStore } from './store';
+import type { ThemeMode } from './theme';
 import type {
 	TuiCitation,
 	TuiContextItem,
@@ -22,6 +23,7 @@ export type TuiController = {
 	) => void;
 	setTitle: (t: string) => void;
 	setRenderMode: (m: 'plain' | 'markdown') => void;
+	setThemeMode: (m: ThemeMode) => void;
 	message: (m?: string) => void;
 };
 
@@ -85,6 +87,9 @@ export function createTuiController(store: TuiStore): TuiController {
 		},
 		setRenderMode(m) {
 			store.set((s) => ({ ...s, ui: { ...s.ui, renderMode: m } }));
+		},
+		setThemeMode(m) {
+			store.set((s) => ({ ...s, ui: { ...s.ui, themeMode: m } }));
 		},
 		message(m) {
 			store.set((s) => ({ ...s, ui: { ...s.ui, message: m } }));

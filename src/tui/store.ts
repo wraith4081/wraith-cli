@@ -1,3 +1,4 @@
+import type { ColorLevel, ThemeMode } from './theme';
 import type {
 	TuiApproval,
 	TuiCitation,
@@ -28,6 +29,8 @@ export type TuiState = {
 		renderMode: RenderMode;
 		focusIndex: number; // 0 chat, 1 context, 2 rules, 3 approvals, 4 diffs, 5 status
 		message?: string;
+		themeMode?: ThemeMode;
+		colorLevel?: ColorLevel;
 	};
 	// callbacks (optional)
 	onApproveTool?: (tool: string) => void | Promise<void>;
@@ -62,6 +65,8 @@ export function createTuiStore(initial?: Partial<TuiState>): TuiStore {
 			renderMode: 'plain',
 			focusIndex: 0,
 			message: undefined,
+			themeMode: 'system',
+			colorLevel: 'basic',
 		},
 		onApproveTool: initial?.onApproveTool,
 		onRejectTool: initial?.onRejectTool,

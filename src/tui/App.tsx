@@ -1,4 +1,4 @@
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import { useSyncExternalStore } from 'react';
 import { ApprovalsPanel } from './panels/ApprovalsPanel';
 import { ChatStreamPanel } from './panels/ChatStreamPanel';
@@ -7,11 +7,10 @@ import { DiffsPanel } from './panels/DiffsPanel';
 import { RulesPanel } from './panels/RulesPanel';
 import { StatusPanel } from './panels/StatusPanel';
 import type { TuiStore } from './store';
+import { useTheme, useThemeController } from './theme';
 
 async function copyToClipboard(text: string): Promise<boolean> {
 	try {
-		// optional dependency
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const c = require('clipboardy');
 		await c.write(text);
 		return true;
@@ -30,15 +29,19 @@ function extractLastCodeBlock(s: string): string | null {
 
 export default function App({ store }: { store: TuiStore }) {
 	const state = useSyncExternalStore(store.subscribe, store.get, store.get);
+	const { stdout } = useStdout();
+	const cols = stdout?.columns ?? 120;
+	const isNarrow = cols < 90; // threshold for degraded single-panel layout
+
+	const theme = useTheme();
+	const themeCtl = useThemeController();
 
 	// keybindings
 	useInput(async (input, key) => {
-		// quit
 		if (input === 'q') {
 			process.exit(0);
 			return;
 		}
-		// tab focus
 		if (key.tab) {
 			store.set((s) => ({
 				...s,
@@ -53,7 +56,6 @@ export default function App({ store }: { store: TuiStore }) {
 			}));
 			return;
 		}
-		// render mode
 		if (input === 'r') {
 			store.set((s) => ({
 				...s,
@@ -69,7 +71,23 @@ export default function App({ store }: { store: TuiStore }) {
 			}));
 			return;
 		}
-		// history nav
+		if (input === 't') {
+			const next =
+				(theme.mode === 'system' && 'light') ||
+				(theme.mode === 'light' && 'dark') ||
+				'system';
+			themeCtl.setMode(next);
+			store.set((s) => ({
+				...s,
+				ui: {
+					...s.ui,
+					themeMode: next,
+					colorLevel: theme.colorLevel,
+					message: `Theme: ${next}`,
+				},
+			}));
+			return;
+		}
 		if (input === '[') {
 			await state.onNavigateHistory?.(-1);
 			return;
@@ -78,7 +96,6 @@ export default function App({ store }: { store: TuiStore }) {
 			await state.onNavigateHistory?.(1);
 			return;
 		}
-		// approvals
 		if (input === 'y') {
 			const first = state.approvals.find((a) => a.pending);
 			if (first && state.onApproveTool) {
@@ -93,13 +110,11 @@ export default function App({ store }: { store: TuiStore }) {
 			}
 			return;
 		}
-		// open diff viewer
 		if (input === 'o') {
 			const sel = state.diffs[0];
 			await state.onOpenDiff?.(sel?.title);
 			return;
 		}
-		// copy last code block
 		if (input === 'c') {
 			const block = extractLastCodeBlock(state.chat.response);
 			if (!block) {
@@ -123,59 +138,73 @@ export default function App({ store }: { store: TuiStore }) {
 		}
 	});
 
+	// pick which panels to show when narrow
+	const focused = state.ui.focusIndex;
+	const leftStack = (
+		<>
+			<ChatStreamPanel
+				focused={focused === 0}
+				input={state.chat.input}
+				response={state.chat.response}
+				streaming={state.chat.streaming}
+			/>
+			<ContextPanel
+				citations={state.context.citations}
+				focused={focused === 1}
+				items={state.context.items}
+			/>
+		</>
+	);
+	const rightStack = (
+		<>
+			<RulesPanel focused={focused === 2} sections={state.rules} />
+			<ApprovalsPanel
+				approvals={state.approvals}
+				focused={focused === 3}
+			/>
+			<DiffsPanel diffs={state.diffs} focused={focused === 4} />
+			<StatusPanel focused={focused === 5} status={state.status} />
+		</>
+	);
+
 	return (
 		<Box flexDirection="column" width="100%">
 			{/* Title bar */}
 			<Box paddingX={1} paddingY={0}>
 				<Text bold>{state.title}</Text>
+				<Text color="gray">
+					{' '}
+					— theme {theme.mode} • colors {theme.colorLevel} • {cols}x
+				</Text>
 				{state.ui.message ? (
 					<Text color="gray"> — {state.ui.message}</Text>
 				) : null}
 			</Box>
 
-			{/* 2-column layout */}
-			<Box width="100%">
-				{/* Left column (primary) */}
-				<Box flexDirection="column" flexGrow={1} width="60%">
-					<ChatStreamPanel
-						focused={state.ui.focusIndex === 0}
-						input={state.chat.input}
-						response={state.chat.response}
-						streaming={state.chat.streaming}
-					/>
-					<ContextPanel
-						citations={state.context.citations}
-						focused={state.ui.focusIndex === 1}
-						items={state.context.items}
-					/>
+			{isNarrow ? (
+				// Degraded single-panel layout: only focused panel + status
+				<Box flexDirection="column" width="100%">
+					{focused <= 1 ? leftStack : rightStack}
+					<StatusPanel focused={false} status={state.status} />
 				</Box>
-
-				{/* Right column (secondary stack) */}
-				<Box flexDirection="column" width="40%">
-					<RulesPanel
-						focused={state.ui.focusIndex === 2}
-						sections={state.rules}
-					/>
-					<ApprovalsPanel
-						approvals={state.approvals}
-						focused={state.ui.focusIndex === 3}
-					/>
-					<DiffsPanel
-						diffs={state.diffs}
-						focused={state.ui.focusIndex === 4}
-					/>
-					<StatusPanel
-						focused={state.ui.focusIndex === 5}
-						status={state.status}
-					/>
+			) : (
+				// Two-column layout (default)
+				<Box width="100%">
+					<Box flexDirection="column" flexGrow={1} width="60%">
+						{leftStack}
+					</Box>
+					<Box flexDirection="column" width="40%">
+						{rightStack}
+					</Box>
 				</Box>
-			</Box>
+			)}
 
 			{/* Footer hint */}
 			<Box paddingX={1} paddingY={1}>
 				<Text color="gray">
-					Tab/Shift+Tab: panels • r: render • c: copy code • [ / ]:
-					history • y/n: approve/reject • o: open diff • q: quit
+					Tab/Shift+Tab: panels • r: render • t: theme • c: copy code
+					• [ / ]: history • y/n: approve/reject • o: open diff • q:
+					quit
 				</Text>
 			</Box>
 		</Box>
