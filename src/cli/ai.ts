@@ -9,6 +9,7 @@ import { registerConfigureCommand } from './commands/configure';
 import { registerModelsCommand } from './commands/models';
 import { registerPromptCommand } from './commands/prompt';
 import { registerRulesCommand } from './commands/rules';
+import { registerSessionsCommands } from './commands/sessions';
 
 if (typeof globalThis.Bun === 'undefined') {
 	console.error(
@@ -84,5 +85,6 @@ registerModelsCommand(program);
 registerAskCommand(program);
 registerRulesCommand(program);
 registerPromptCommand(program);
+registerSessionsCommands(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);
