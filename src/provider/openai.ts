@@ -1,5 +1,6 @@
 import { getLogger } from '@obs/logger';
 import OpenAI from 'openai';
+import type { Stream } from 'openai/core/streaming.mjs';
 import {
 	type ChatRequest,
 	type ChatResult,
@@ -134,16 +135,36 @@ export class OpenAIProvider implements IProvider {
 				content: m.content,
 			})) as OpenAI.Chat.Completions.ChatCompletionMessageParam[];
 
-			const stream = await this.client.chat.completions.create(
-				{
-					model: req.model,
-					messages,
-					temperature: req.temperature,
-					top_p: req.topP,
-					stream: true,
-				},
+			const createArgs: Record<string, unknown> = {
+				model: req.model,
+				messages,
+				temperature: req.temperature,
+				top_p: req.topP,
+				stream: true,
+			};
+
+			if (req.jsonSchema) {
+				// If caller provided a JSON schema, ask OpenAI to enforce it.
+				createArgs.response_format = {
+					type: 'json_schema',
+					json_schema: {
+						name: 'wraith_cli_schema',
+						schema: req.jsonSchema,
+					},
+				};
+				// Safety: low temperature helps schema adherence
+				if (typeof createArgs.temperature !== 'number') {
+					createArgs.temperature = 0;
+				}
+			}
+
+			const stream = (await this.client.chat.completions.create(
+				// biome-ignore lint/suspicious/noExplicitAny: SDK accepts additional fields at runtime
+				createArgs as any,
 				{ signal }
-			);
+			)) as OpenAI.Chat.Completions.ChatCompletion & {
+				_request_id?: string | null;
+			} & Stream<OpenAI.Chat.Completions.ChatCompletionChunk>;
 
 			let content = '';
 			let finishReason: string | undefined;

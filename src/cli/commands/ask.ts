@@ -1,4 +1,6 @@
+import path from 'node:path';
 import { type AskResult, runAsk } from '@core/orchestrator';
+import { runAskStructured } from '@core/structured';
 import { isProviderError } from '@provider/types';
 import { type RenderMode, renderText } from '@render/markdown';
 
@@ -39,23 +41,66 @@ export interface AskCliOptions {
 	modelFlag?: string;
 	profileFlag?: string;
 	json?: boolean;
-	stream?: boolean; // default true unless --no-stream
-	render?: RenderMode; // 'plain' | 'markdown' | 'ansi'
+	stream?: boolean;
+	render?: RenderMode;
+	output?: 'text' | 'json';
+	schemaPath?: string;
 }
 
 export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 	const startedAt = Date.now();
-	const render: RenderMode = opts.render ?? 'markdown';
 
-	// Force no-stream for non-markdown modes so we can render properly.
-	const forceNoStream = render !== 'markdown';
-	const wantStream = opts.stream !== false && !forceNoStream;
-	const wantJson = opts.json === true;
+	// Structured mode enforcement
+	const structured = (opts.output ?? 'text') === 'json';
+	if (structured && !opts.schemaPath) {
+		const msg = 'Structured mode requires --schema <file>';
+		if (opts.json) {
+			process.stdout.write(
+				`${JSON.stringify({ ok: false, error: { message: msg }, timing: { startedAt, elapsedMs: 0 } })}\n`
+			);
+			return 1;
+		}
+		process.stderr.write(`${msg}\n`);
+		return 1;
+	}
 
+	// Read prompt (stdin allowed)
 	const prompt =
 		opts.prompt === '-'
 			? await readAllFromStdin()
 			: String(opts.prompt ?? '');
+
+	if (structured && opts.schemaPath) {
+		try {
+			const res = await runAskStructured({
+				prompt,
+				schemaPath: path.resolve(opts.schemaPath),
+				modelFlag: opts.modelFlag,
+				profileFlag: opts.profileFlag,
+				maxAttempts: 1,
+			});
+
+			if (res.ok) {
+				process.stdout.write(`${JSON.stringify(res.data)}\n`);
+				return 0;
+			}
+			const out = {
+				ok: false as const,
+				error: {
+					message: 'Schema validation failed',
+					errors: res.errors,
+				},
+				text: res.text,
+				timing: res.timing,
+			};
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 1;
+		} catch (err) {
+			const out = formatAskJsonErr(err, startedAt);
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 1;
+		}
+	}
 
 	try {
 		let streamed = '';
@@ -142,6 +187,15 @@ export function registerAskCommand(program: unknown): void {
 				'Rendering: plain|markdown|ansi',
 				'markdown'
 			)
+			.option(
+				'--output <mode>',
+				'Output mode: text|json (use with --schema for structured JSON)',
+				'text'
+			)
+			.option(
+				'--schema <file>',
+				'JSON/YAML schema file for structured output'
+			)
 			.option('--no-stream', 'Disable token streaming; print once at end')
 			.action(async (prompt: string, flags: Record<string, unknown>) => {
 				const code = await handleAskCommand({
@@ -179,6 +233,15 @@ export function registerAskCommand(program: unknown): void {
 				'--no-stream',
 				'Disable token streaming; print once at end',
 				false
+			)
+			.option(
+				'--output <mode>',
+				'Output mode: text|json (use with --schema for structured JSON)',
+				'text'
+			)
+			.option(
+				'--schema <file>',
+				'JSON/YAML schema file for structured output'
 			);
 
 		cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
