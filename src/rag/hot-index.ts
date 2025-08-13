@@ -1,240 +1,247 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hotIndexDir as defaultHotDir } from '@util/paths';
-import type { ChunkEmbedding } from './types';
-
-export type HotIndexItem = {
-	id: string;
-	model: string;
-	filePath: string;
-	startLine: number;
-	endLine: number;
-	dim: number;
-	vector: number[]; // stored as number[]; kept lightweight for v1
-	norm: number; // cached L2 norm for cosine
-	tokensEstimated: number;
-	uses: number; // frequency counter
-	lastUsedAt: number; // ms epoch, for LRU
-};
-
-export type HotIndexSaveFormat = {
-	version: 1;
-	maxSize: number;
-	items: HotIndexItem[];
-};
+import type { ChunkEmbedding, RetrievedChunk } from '@rag/types';
+import { hotIndexDir } from '@util/paths';
 
 export interface HotIndexOptions {
-	dir?: string;
-	maxSize?: number; // cap on vectors stored (evict by LRU+freq)
-	autosave?: boolean; // write after upserts/evictions
-	filename?: string; // index filename under dir
+	baseDir?: string; // directory for persistence
+	capacity?: number; // max items kept in hot index
+	writeThroughMs?: number; // debounce writes to disk
 }
 
-function l2norm(v: number[]): number {
-	let s = 0;
-	// faster loop than reduce for large arrays
-	for (const value of v) {
-		s += value ^ 2;
-	}
-	return Math.sqrt(s || 1e-12);
+interface Stored {
+	chunk: ChunkEmbedding;
+	usage: number;
+	lastAccessMs: number;
 }
 
-function cosine(a: number[], b: number[], normB?: number): number {
-	// a is query (likely not in index), b is item
-	const nA = l2norm(a);
-	const nB = normB ?? l2norm(b);
+interface StoreV1 {
+	version: 1;
+	items: Record<string, Stored>;
+}
+
+const FILE_NAME = 'hot.store.v1.json';
+const DEF_CAPACITY = 1000;
+const DEF_WRITE_MS = 300;
+
+function cosine(a: number[], b: number[]): number {
 	let dot = 0;
-	const L = Math.min(a.length, b.length);
-	for (let i = 0; i < L; i++) {
-		dot += a[i] * b[i];
+	let na = 0;
+	let nb = 0;
+	const n = Math.max(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		const x = a[i] ?? 0;
+		const y = b[i] ?? 0;
+		dot += x * y;
+		na += x * x;
+		nb += y * y;
 	}
-	return dot / (nA * nB);
+	const den = Math.sqrt(na) * Math.sqrt(nb);
+	return den > 0 ? dot / den : 0;
 }
 
-export class HotIndex {
-	private items = new Map<string, HotIndexItem>();
-	private maxSize: number;
-	private autosave: boolean;
-	private filePath: string;
+export interface HotIndexLike {
+	search(
+		queryVector: number[],
+		opts?: { topK?: number; modelFilter?: string; scoreThreshold?: number }
+	): Promise<RetrievedChunk[]>;
+}
+
+export class HotIndex implements HotIndexLike {
+	private readonly dir: string;
+	private readonly file: string;
+	private readonly capacity: number;
+	private readonly writeThroughMs: number;
+	private items = new Map<string, Stored>();
+	private pendingWrite?: NodeJS.Timeout;
 
 	constructor(opts: HotIndexOptions = {}) {
-		const dir = path.resolve(opts.dir ?? defaultHotDir);
-		this.maxSize = Math.max(1, opts.maxSize ?? 50_000); // default cap
-		this.autosave = opts.autosave ?? true;
-		this.filePath = path.join(dir, opts.filename ?? 'index.json');
-
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true });
+		this.dir = opts.baseDir ?? hotIndexDir;
+		if (!fs.existsSync(this.dir)) {
+			fs.mkdirSync(this.dir, { recursive: true });
 		}
-		this.loadIfExists();
+		this.file = path.join(this.dir, FILE_NAME);
+		this.capacity = Math.max(1, opts.capacity ?? DEF_CAPACITY);
+		this.writeThroughMs = Math.max(0, opts.writeThroughMs ?? DEF_WRITE_MS);
+		this.load();
 	}
 
-	private loadIfExists() {
-		if (!fs.existsSync(this.filePath)) {
-			return;
-		}
-		try {
-			const raw = fs.readFileSync(this.filePath, 'utf8');
-			const parsed = JSON.parse(raw) as HotIndexSaveFormat;
-			if (parsed?.version === 1 && Array.isArray(parsed.items)) {
-				this.maxSize = parsed.maxSize ?? this.maxSize;
-				for (const it of parsed.items) {
-					this.items.set(it.id, it);
-				}
-			}
-		} catch {
-			// best-effort; corrupted index will be rebuilt
-			this.items.clear();
-		}
-	}
-
-	private save() {
-		const payload: HotIndexSaveFormat = {
-			version: 1,
-			maxSize: this.maxSize,
-			items: Array.from(this.items.values()),
-		};
-		// atomic-ish write
-		const tmp = `${this.filePath}.tmp`;
-		fs.writeFileSync(tmp, JSON.stringify(payload));
-		fs.renameSync(tmp, this.filePath);
-		try {
-			if (process.platform !== 'win32') {
-				fs.chmodSync(this.filePath, 0o600);
-			}
-		} catch {
-			/* ignore */
-		}
-	}
-
-	private evictIfNeeded() {
-		if (this.items.size <= this.maxSize) {
-			return;
-		}
-		// Eviction policy: sort by (uses asc, lastUsedAt asc), drop oldest/least-used first
-		const victims = Array.from(this.items.values()).sort(
-			(a, b) => a.uses - b.uses || a.lastUsedAt - b.lastUsedAt
-		);
-		const toRemove = this.items.size - this.maxSize;
-		for (let i = 0; i < toRemove; i++) {
-			this.items.delete(victims[i].id);
-		}
-	}
-
-	upsert(chunks: ChunkEmbedding[]) {
+	async upsert(chunks: ChunkEmbedding[]): Promise<number> {
+		let n = 0;
 		const now = Date.now();
 		for (const c of chunks) {
-			const item: HotIndexItem = {
-				id: c.id,
-				model: c.model,
-				filePath: c.filePath,
-				startLine: c.startLine,
-				endLine: c.endLine,
-				dim: c.dim,
-				vector: c.vector,
-				norm: l2norm(c.vector),
-				tokensEstimated: c.tokensEstimated,
-				uses: this.items.get(c.id)?.uses ?? 0,
-				lastUsedAt: now,
-			};
-			this.items.set(item.id, item);
+			const prev = this.items.get(c.id);
+			this.items.set(c.id, {
+				chunk: c,
+				usage: prev?.usage ?? 0,
+				lastAccessMs: now,
+			});
+			n++;
 		}
-		this.evictIfNeeded();
-		if (this.autosave) {
-			this.save();
+		this.enforceCapacity();
+		this.scheduleSave();
+		return await Promise.resolve(n);
+	}
+
+	async deleteByIds(ids: string[]): Promise<number> {
+		let n = 0;
+		for (const id of ids) {
+			if (this.items.delete(id)) {
+				n++;
+			}
+		}
+		if (n > 0) {
+			this.scheduleSave();
+		}
+		return await Promise.resolve(n);
+	}
+
+	recordUsage(ids: string[]): void {
+		const now = Date.now();
+		let touched = false;
+		for (const id of ids) {
+			const rec = this.items.get(id);
+			if (!rec) {
+				continue;
+			}
+			rec.usage++;
+			rec.lastAccessMs = now;
+			this.items.set(id, rec);
+			touched = true;
+		}
+		if (touched) {
+			this.scheduleSave();
 		}
 	}
 
-	// Replace (or set) the capacity and evict to fit if needed
-	resize(maxSize: number) {
-		this.maxSize = Math.max(1, maxSize | 0);
-		this.evictIfNeeded();
-		if (this.autosave) {
-			this.save();
-		}
-	}
-
-	size() {
-		return this.items.size;
-	}
-
-	has(id: string) {
+	has(id: string): boolean {
 		return this.items.has(id);
 	}
 
-	get(id: string) {
-		return this.items.get(id);
-	}
+	async search(
+		queryVector: number[],
+		opts: {
+			topK?: number;
+			modelFilter?: string;
+			scoreThreshold?: number;
+		} = {}
+	): Promise<RetrievedChunk[]> {
+		const topK = Math.max(1, opts.topK ?? 8);
+		const mdl = opts.modelFilter;
+		const thr = opts.scoreThreshold;
 
-	delete(id: string) {
-		const ok = this.items.delete(id);
-		if (ok && this.autosave) {
-			this.save();
-		}
-		return ok;
-	}
-
-	clear() {
-		this.items.clear();
-		if (this.autosave) {
-			this.save();
-		}
-	}
-
-	/** cosine KNN over the in-memory set; small-N brute force is OK for v1 */
-	query(opts: {
-		vector: number[];
-		topK: number;
-		modelFilter?: string | string[];
-		filePathPrefix?: string;
-	}): Array<{ score: number; item: HotIndexItem }> {
-		const { vector, topK } = opts;
-		const models = Array.isArray(opts.modelFilter)
-			? new Set(opts.modelFilter)
-			: opts.modelFilter
-				? new Set([opts.modelFilter])
-				: undefined;
-
-		const out: Array<{ score: number; item: HotIndexItem }> = [];
-		for (const item of this.items.values()) {
-			if (models && !models.has(item.model)) {
+		// Compute scores
+		const scored: RetrievedChunk[] = [];
+		for (const rec of this.items.values()) {
+			if (mdl && rec.chunk.model !== mdl) {
 				continue;
 			}
-			if (
-				opts.filePathPrefix &&
-				!item.filePath.startsWith(opts.filePathPrefix)
-			) {
+			const s = cosine(queryVector, rec.chunk.vector);
+			if (typeof thr === 'number' && s < thr) {
 				continue;
 			}
+			scored.push({ chunk: rec.chunk, score: s, source: 'hot' });
+		}
+		// Sort desc and take topK
+		scored.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+		const out = scored.slice(0, topK);
 
-			const score = cosine(vector, item.vector, item.norm);
-			out.push({ score, item });
+		// Update usage for returned hits
+		this.recordUsage(out.map((h) => h.chunk.id));
+		return await Promise.resolve(out);
+	}
+
+	/** Internal: keep at/below capacity via eviction */
+	private enforceCapacity(): void {
+		const over = this.items.size - this.capacity;
+		if (over <= 0) {
+			return;
 		}
 
-		out.sort((a, b) => b.score - a.score);
-		const results = out.slice(0, Math.max(1, topK));
+		// Build sortable list [id, usage, lastAccess]
+		const arr: Array<{
+			id: string;
+			usage: number;
+			lastAccess: number;
+		}> = [];
+		for (const [id, rec] of this.items.entries()) {
+			arr.push({
+				id,
+				usage: rec.usage,
+				lastAccess: rec.lastAccessMs,
+			});
+		}
+		// Sort ascending by usage, then ascending by lastAccess (oldest first)
+		arr.sort((a, b) => a.usage - b.usage || a.lastAccess - b.lastAccess);
 
-		// update usage stats
-		const now = Date.now();
-		for (const r of results) {
-			const it = this.items.get(r.item.id);
-			if (it) {
-				it.uses += 1;
-				it.lastUsedAt = now;
+		for (let i = 0; i < over; i++) {
+			const victim = arr[i];
+			if (!victim) {
+				break;
 			}
+			this.items.delete(victim.id);
 		}
-		if (this.autosave) {
+	}
+
+	private load(): void {
+		if (!fs.existsSync(this.file)) {
+			return;
+		}
+		try {
+			const raw = fs.readFileSync(this.file, 'utf8');
+			const parsed = JSON.parse(raw) as StoreV1;
+			if (parsed?.version !== 1 || !parsed.items) {
+				return;
+			}
+			const map = new Map<string, Stored>();
+			for (const [id, s] of Object.entries(parsed.items)) {
+				// sanity checks
+				if (!(s?.chunk?.id && Array.isArray(s.chunk.vector))) {
+					continue;
+				}
+				map.set(id, {
+					chunk: s.chunk,
+					usage: Math.max(0, Number(s.usage ?? 0)),
+					lastAccessMs: Math.max(0, Number(s.lastAccessMs ?? 0)),
+				});
+			}
+			this.items = map;
+		} catch {
+			// ignore malformed store
+		}
+	}
+
+	private scheduleSave(): void {
+		if (this.writeThroughMs === 0) {
 			this.save();
+			return;
 		}
-		return results;
+		if (this.pendingWrite) {
+			clearTimeout(this.pendingWrite);
+		}
+		this.pendingWrite = setTimeout(() => {
+			this.save();
+			this.pendingWrite = undefined;
+		}, this.writeThroughMs);
 	}
 
-	/** Persist immediately (handy if autosave=false). */
-	flush() {
-		this.save();
+	private save(): void {
+		const obj: StoreV1 = { version: 1, items: {} };
+		for (const [id, s] of this.items.entries()) {
+			obj.items[id] = s;
+		}
+		const json = JSON.stringify(obj, null, 2);
+		fs.writeFileSync(this.file, json, 'utf8');
+		try {
+			if (process.platform !== 'win32') {
+				fs.chmodSync(this.file, 0o600);
+			}
+		} catch {
+			// ignore
+		}
 	}
-}
 
-export function loadHotIndex(opts?: HotIndexOptions) {
-	return new HotIndex(opts);
+	getBaseDir(): string {
+		return this.dir;
+	}
 }

@@ -153,7 +153,6 @@ export function registerRulesCommand(program: Command) {
 			}
 		);
 
-	// 4.4: list
 	rules
 		.command('list')
 		.description('List rules grouped by title and scope')
