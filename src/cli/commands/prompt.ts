@@ -47,10 +47,10 @@ export function computeEffectivePrompt(
 		defaultPrompt: getDefaultSystemPrompt(),
 		userSections,
 		projectSections,
-		override: opts.systemOverride,
+		systemOverride: opts.systemOverride,
 	});
 
-	return {
+	return Promise.resolve({
 		prompt,
 		meta: {
 			profile: opts.profile,
@@ -59,7 +59,7 @@ export function computeEffectivePrompt(
 			projectSectionCount: projectSections.length,
 			overrideMode: opts.systemOverride?.mode,
 		},
-	};
+	});
 }
 
 function readSystemOverrideContent(spec?: string): string | undefined {

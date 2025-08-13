@@ -13,8 +13,9 @@ export interface AskOptions {
 	prompt: string;
 	modelFlag?: string;
 	profileFlag?: string;
+	systemOverride?: string;
+	instructions?: string;
 }
-
 export interface AskDeps {
 	provider?: IProvider;
 	config?: unknown;
@@ -60,6 +61,8 @@ export interface ChatSession {
 export interface StartChatOptions {
 	modelFlag?: string;
 	profileFlag?: string;
+	systemOverride?: string;
+	instructions?: string;
 }
 
 export interface StartChatDeps {
@@ -91,10 +94,22 @@ export function startChatSession(
 		defaultPrompt: getDefaultSystemPrompt(),
 		userSections,
 		projectSections,
+		overrideTitle: 'Session Overrides',
+		overrideContent: opts.systemOverride, // persists across the whole session
 	});
 
-	// Seed with system message
+	// Seed history
 	const history: ChatMessage[] = [{ role: 'system', content: systemPrompt }];
+
+	if (opts.instructions?.trim()) {
+		// If caller provided persistent instructions, inject as the first user turn
+		history.push({
+			role: 'user',
+			content:
+				'Follow these persistent instructions for this session:\n' +
+				opts.instructions.trim(),
+		});
+	}
 
 	const session: ChatSession = {
 		model: selection.modelId,
@@ -210,8 +225,25 @@ export async function runAsk(
 		defaultPrompt: getDefaultSystemPrompt(),
 		userSections,
 		projectSections,
-		// per-command override will be added in a later task
+		overrideTitle: 'Command Overrides',
+		overrideContent: opts.systemOverride, // append if provided
 	});
+
+	const messages: { role: 'system' | 'user'; content: string }[] = [
+		{ role: 'system', content: systemPrompt },
+	];
+
+	if (opts.instructions?.trim()) {
+		// If caller passed instructions, keep them as a dedicated first user turn
+		messages.push({
+			role: 'user',
+			content:
+				'Follow these persistent instructions for this request:\n' +
+				opts.instructions.trim(),
+		});
+	}
+
+	messages.push({ role: 'user', content: opts.prompt });
 
 	let accumulated = '';
 	const onDelta = (s: string) => {
@@ -220,15 +252,9 @@ export async function runAsk(
 			deps.onDelta(s);
 		}
 	};
-
+	// pass messages to provider.streamChat(...)
 	const result = await provider.streamChat(
-		{
-			model: selection.modelId,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				{ role: 'user', content: opts.prompt },
-			],
-		},
+		{ model: selection.modelId, messages },
 		(d) => {
 			if (typeof d.content === 'string' && d.content.length > 0) {
 				onDelta(d.content);

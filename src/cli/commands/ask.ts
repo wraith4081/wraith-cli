@@ -2,75 +2,45 @@ import path from 'node:path';
 import { type AskResult, runAsk } from '@core/orchestrator';
 import { runAskStructured } from '@core/structured';
 import { isProviderError } from '@provider/types';
-import { type RenderMode, renderText } from '@render/markdown';
-
-export function formatAskJsonOk(result: AskResult) {
-	return {
-		ok: true as const,
-		answer: result.answer,
-		model: result.model,
-		usage: result.usage ?? null,
-		timing: result.timing,
-	};
-}
-
-export function formatAskJsonErr(err: unknown, startedAt: number) {
-	const elapsedMs = Date.now() - startedAt;
-	let code: string | undefined;
-	let status: number | undefined;
-	let message = 'Unknown error';
-	if (isProviderError(err)) {
-		code = err.code;
-		status = err.status;
-		message = err.message;
-	} else if (err instanceof Error) {
-		message = err.message;
-	} else if (typeof err === 'string') {
-		message = err;
-	}
-
-	return {
-		ok: false as const,
-		error: { code, status, message },
-		timing: { startedAt, elapsedMs },
-	};
-}
+import { type RenderMode, renderText } from '@render/index';
 
 export interface AskCliOptions {
-	prompt: string;
+	prompt: string; // "-" to read from stdin
 	modelFlag?: string;
 	profileFlag?: string;
-	json?: boolean;
-	stream?: boolean;
-	render?: RenderMode;
-	output?: 'text' | 'json';
+
+	// output/formatting
+	json?: boolean; // envelope {answer, model, usage, timing} (non-structured)
+	stream?: boolean; // default true (ignored when render !== 'markdown')
+	render?: RenderMode; // 'markdown' | 'plain' | 'ansi'
+
+	// structured mode
+	output?: 'text' | 'json'; // when 'json', requires --schema
 	schemaPath?: string;
+
+	// one-off prompt shaping
+	systemOverride?: string; // appended to system prompt as "Command Overrides"
+	instructions?: string; // injected as a preliminary user message (before main prompt)
 }
 
 export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 	const startedAt = Date.now();
 
-	// Structured mode enforcement
-	const structured = (opts.output ?? 'text') === 'json';
-	if (structured && !opts.schemaPath) {
-		const msg = 'Structured mode requires --schema <file>';
-		if (opts.json) {
-			process.stdout.write(
-				`${JSON.stringify({ ok: false, error: { message: msg }, timing: { startedAt, elapsedMs: 0 } })}\n`
-			);
-			return 1;
-		}
-		process.stderr.write(`${msg}\n`);
-		return 1;
-	}
-
-	// Read prompt (stdin allowed)
 	const prompt =
 		opts.prompt === '-'
 			? await readAllFromStdin()
 			: String(opts.prompt ?? '');
 
-	if (structured && opts.schemaPath) {
+	// Structured mode takes precedence and produces ONLY the validated JSON on success
+	const structured = (opts.output ?? 'text') === 'json';
+	if (structured) {
+		if (!opts.schemaPath) {
+			return emitError(
+				'Structured mode requires --schema <file>',
+				startedAt,
+				opts.json ?? false
+			);
+		}
 		try {
 			const res = await runAskStructured({
 				prompt,
@@ -79,7 +49,6 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 				profileFlag: opts.profileFlag,
 				maxAttempts: 1,
 			});
-
 			if (res.ok) {
 				process.stdout.write(`${JSON.stringify(res.data)}\n`);
 				return 0;
@@ -102,6 +71,12 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 		}
 	}
 
+	// Non-structured path (supports streaming + render modes + optional JSON envelope)
+	const render: RenderMode = opts.render ?? 'markdown';
+	const forceNoStream = render !== 'markdown';
+	const wantStream = opts.stream !== false && !forceNoStream;
+	const wantJson = opts.json === true;
+
 	try {
 		let streamed = '';
 		const result = await runAsk(
@@ -109,6 +84,8 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 				prompt,
 				modelFlag: opts.modelFlag,
 				profileFlag: opts.profileFlag,
+				systemOverride: opts.systemOverride,
+				instructions: opts.instructions,
 			},
 			{
 				onDelta:
@@ -128,14 +105,12 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 		}
 
 		if (wantStream && streamed.length > 0) {
-			// streamed markdown already printed; ensure newline
 			if (!streamed.endsWith('\n')) {
 				process.stdout.write('\n');
 			}
 			return 0;
 		}
 
-		// Non-stream path or forced render: print whole rendered answer
 		const rendered = renderText(result.answer, render);
 		process.stdout.write(rendered);
 		if (!rendered.endsWith('\n')) {
@@ -159,28 +134,23 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 }
 
 export function registerAskCommand(program: unknown): void {
-	const isSade =
-		typeof (program as { command?: unknown }).command === 'function' &&
-		typeof (program as { option?: unknown }).option === 'function' &&
-		typeof (program as { action?: unknown }).action === 'function';
+	// biome-ignore lint/suspicious/noExplicitAny: CLI frameworks are duck-typed
+	const app: any = program;
 
-	const isCommander =
-		typeof (program as { command?: unknown }).command === 'function' &&
-		typeof (program as { description?: unknown }).description ===
-			'function';
-
-	if (isSade) {
-		// biome-ignore lint/suspicious/noExplicitAny: CLI duck-typing
-		const app = program as any;
+	// Try sade shape first
+	if (
+		typeof app.command === 'function' &&
+		typeof app.option === 'function' &&
+		typeof app.action === 'function'
+	) {
 		app.command('ask <prompt>')
-			.describe(
-				'Single-shot ask with streaming output (use "-" to read prompt from stdin)'
-			)
+			.describe('Single question; prints the model response')
 			.option('-m, --model <id>', 'Override model id')
 			.option('-p, --profile <name>', 'Use profile defaults')
+			.option('--json', 'Output a JSON envelope (non-structured mode)')
 			.option(
-				'--json',
-				'Emit JSON { ok, answer|error, model, usage, timing }'
+				'--no-stream',
+				'Disable streaming output (markdown only streams)'
 			)
 			.option(
 				'--render <mode>',
@@ -189,101 +159,135 @@ export function registerAskCommand(program: unknown): void {
 			)
 			.option(
 				'--output <mode>',
-				'Output mode: text|json (use with --schema for structured JSON)',
+				'Output mode: text|json (use with --schema)',
 				'text'
 			)
 			.option(
 				'--schema <file>',
 				'JSON/YAML schema file for structured output'
 			)
-			.option('--no-stream', 'Disable token streaming; print once at end')
+			.option(
+				'--system <text>',
+				'Append a system section just for this command'
+			)
+			.option(
+				'--instructions <text>',
+				'Add a user-scoped instruction before the prompt'
+			)
 			.action(async (prompt: string, flags: Record<string, unknown>) => {
 				const code = await handleAskCommand({
 					prompt,
-					render: toRender(flags.render),
 					modelFlag: toOpt(flags.model),
 					profileFlag: toOpt(flags.profile),
-					json: !!flags.json,
-					stream:
-						!(flags as { stream?: boolean }).stream === false
-							? false
-							: (flags as { stream?: boolean }).stream !== false,
+					json: flags.json === true,
+					stream: flags.stream !== false,
+					render: toRender(flags.render),
+					output: toOutput(flags.output),
+					schemaPath: toOpt(flags.schema),
+					systemOverride: toOpt(flags.system),
+					instructions: toOpt(flags.instructions),
 				});
 				process.exitCode = code;
 			});
 		return;
 	}
 
-	if (isCommander) {
-		// biome-ignore lint/suspicious/noExplicitAny: CLI duck-typing
-		const app = program as any;
-		const cmd = app
-			.command('ask <prompt>')
-			.description(
-				'Single-shot ask with streaming output (use "-" to read prompt from stdin)'
-			)
-			.option('-m, --model <id>', 'Override model id')
-			.option('-p, --profile <name>', 'Use profile defaults')
-			.option(
-				'--json',
-				'Emit JSON { ok, answer|error, model, usage, timing }',
-				false
-			)
-			.option(
-				'--no-stream',
-				'Disable token streaming; print once at end',
-				false
-			)
-			.option(
-				'--output <mode>',
-				'Output mode: text|json (use with --schema for structured JSON)',
-				'text'
-			)
-			.option(
-				'--schema <file>',
-				'JSON/YAML schema file for structured output'
-			);
+	// Commander fallback
+	const cmd = app
+		.command('ask <prompt>')
+		.description('Single question; prints the model response')
+		.option('-m, --model <id>', 'Override model id')
+		.option('-p, --profile <name>', 'Use profile defaults')
+		.option('--json', 'Output a JSON envelope (non-structured mode)')
+		.option(
+			'--no-stream',
+			'Disable streaming output (markdown only streams)'
+		)
+		.option('--render <mode>', 'Rendering: plain|markdown|ansi', 'markdown')
+		.option(
+			'--output <mode>',
+			'Output mode: text|json (use with --schema)',
+			'text'
+		)
+		.option(
+			'--schema <file>',
+			'JSON/YAML schema file for structured output'
+		)
+		.option(
+			'--system <text>',
+			'Append a system section just for this command'
+		)
+		.option(
+			'--instructions <text>',
+			'Add a user-scoped instruction before the prompt'
+		);
 
-		cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
-			const code = await handleAskCommand({
-				prompt,
-				render: toRender(flags.render),
-				modelFlag: toOpt(flags.model),
-				profileFlag: toOpt(flags.profile),
-				json: !!flags.json,
-				stream: !(flags as { stream?: boolean }).stream, // commander sets .stream=false when --no-stream is passed
-			});
-			process.exitCode = code;
+	cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
+		const code = await handleAskCommand({
+			prompt,
+			modelFlag: toOpt(flags.model),
+			profileFlag: toOpt(flags.profile),
+			json: flags.json === true,
+			stream: flags.stream !== false,
+			render: toRender(flags.render),
+			output: toOutput(flags.output),
+			schemaPath: toOpt(flags.schema),
+			systemOverride: toOpt(flags.system),
+			instructions: toOpt(flags.instructions),
 		});
-		return;
-	}
-
-	// Fallback: do nothing (caller can use handleAskCommand directly)
+		process.exitCode = code;
+	});
 }
 
 function toOpt(v: unknown): string | undefined {
 	return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
 }
-
-function readAllFromStdin(): Promise<string> {
-	return new Promise((resolve) => {
-		const chunks: Buffer[] = [];
-		if (process.stdin.isTTY) {
-			// Nothing to read; treat as empty
-			resolve('');
-			return;
-		}
-		process.stdin.on('data', (c) =>
-			chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)))
-		);
-		process.stdin.on('end', () =>
-			resolve(Buffer.concat(chunks).toString('utf8'))
-		);
-		process.stdin.resume();
-	});
-}
-
 function toRender(v: unknown): RenderMode {
 	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
 	return s === 'plain' || s === 'ansi' ? (s as RenderMode) : 'markdown';
+}
+function toOutput(v: unknown): 'text' | 'json' {
+	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
+	return s === 'json' ? 'json' : 'text';
+}
+async function readAllFromStdin(): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const c of process.stdin) {
+		chunks.push(Buffer.from(c));
+	}
+	return Buffer.concat(chunks).toString('utf8');
+}
+
+function emitError(msg: string, startedAt: number, asJson: boolean): number {
+	if (asJson) {
+		const out = {
+			ok: false as const,
+			error: { message: msg },
+			timing: { startedAt, elapsedMs: 0 },
+		};
+		process.stdout.write(`${JSON.stringify(out)}\n`);
+		return 1;
+	}
+	process.stderr.write(`${msg}\n`);
+	return 1;
+}
+
+export function formatAskJsonOk(res: AskResult) {
+	return {
+		ok: true as const,
+		answer: res.answer,
+		model: res.model,
+		usage: res.usage ?? null,
+		timing: res.timing,
+	};
+}
+
+export function formatAskJsonErr(err: unknown, startedAt: number) {
+	const elapsedMs = Date.now() - startedAt;
+	const error = isProviderError(err)
+		? { code: err.code, status: err.status, message: err.message }
+		: err instanceof Error
+			? { message: err.message }
+			: { message: String(err) };
+	return { ok: false as const, error, timing: { startedAt, elapsedMs } };
 }

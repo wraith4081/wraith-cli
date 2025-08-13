@@ -64,7 +64,7 @@ function makeAjv() {
 function extractJson(text: string): string | null {
 	// Try fenced ```json blocks first
 	const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-	if (fence && fence[1]) {
+	if (fence?.[1]) {
 		return fence[1].trim();
 	}
 

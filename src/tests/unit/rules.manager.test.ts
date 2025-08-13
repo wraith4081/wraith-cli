@@ -27,7 +27,7 @@ describe('Rules Manager', () => {
 			defaultPrompt: getDefaultSystemPrompt(),
 			userSections: user,
 			projectSections: project,
-			override: {
+			systemOverride: {
 				mode: 'merge',
 				content: 'Focus on performance in answers.',
 			},
@@ -53,7 +53,7 @@ describe('Rules Manager', () => {
 	it('replace mode returns only override content', () => {
 		const prompt = buildEffectiveSystemPrompt({
 			defaultPrompt: getDefaultSystemPrompt(),
-			override: {
+			systemOverride: {
 				mode: 'replace',
 				content: 'You are now a strict linter.',
 			},
