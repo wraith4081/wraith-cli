@@ -30,6 +30,7 @@ export interface AskCliOptions {
 
 	// misc
 	meta?: boolean; // print model/elapsed to stderr in non-JSON mode
+	save?: string; // session name to persist
 }
 
 export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
@@ -111,6 +112,22 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 							},
 			}
 		);
+
+		// Persist single-turn session if requested
+
+		if (opts.save) {
+			const { saveSessionFromAsk } = await import('@sessions/store');
+			saveSessionFromAsk({
+				name: opts.save,
+				prompt,
+				answer: result.answer,
+				model: result.model,
+				profile: opts.profileFlag,
+				usage: result.usage ?? null,
+				startedAt,
+				endedAt: startedAt + (result.timing?.elapsedMs ?? 0),
+			});
+		}
 
 		if (wantJson) {
 			const out = formatAskJsonOk(result);
@@ -207,12 +224,14 @@ export function registerAskCommand(program: unknown): void {
 				'--file <path>',
 				'Read prompt from file (alternative to "-" for stdin)'
 			)
+			.option('--save <name>', 'Save this turn as a session under <name>')
 			.option('--meta', 'Print model + elapsed timing to stderr')
 			.action(async (prompt: string, flags: Record<string, unknown>) => {
 				const code = await handleAskCommand({
 					prompt,
 					modelFlag: toOpt(flags.model),
 					profileFlag: toOpt(flags.profile),
+					save: toOpt(flags.save),
 					json: flags.json === true,
 					stream: flags.stream !== false,
 					render: toRender(flags.render),
@@ -269,6 +288,7 @@ export function registerAskCommand(program: unknown): void {
 			'--file <path>',
 			'Read prompt from file (alternative to "-" for stdin)'
 		)
+		.option('--save <name>', 'Save this turn as a session under <name>')
 		.option('--meta', 'Print model + elapsed timing to stderr');
 
 	cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
@@ -276,6 +296,7 @@ export function registerAskCommand(program: unknown): void {
 			prompt,
 			modelFlag: toOpt(flags.model),
 			profileFlag: toOpt(flags.profile),
+			save: toOpt(flags.save),
 			json: flags.json === true,
 			stream: flags.stream !== false,
 			render: toRender(flags.render),

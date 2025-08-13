@@ -24,6 +24,7 @@ export default defineConfig({
 			'@rag': path.resolve(__dirname, 'src/rag'),
 			'@tools': path.resolve(__dirname, 'src/tools'),
 			'@render': path.resolve(__dirname, 'src/render'),
+			'@sessions': path.resolve(__dirname, 'src/sessions'),
 		},
 	},
 });

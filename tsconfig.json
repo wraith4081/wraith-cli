@@ -22,7 +22,8 @@
       "@ingest/*": ["src/ingest/*"],
       "@rag/*": ["src/rag/*"],
       "@tools/*": ["src/tools/*"],
-      "@render/*": ["src/render/*"]
+      "@render/*": ["src/render/*"],
+      "@sessions/*": ["src/sessions/*"]
     }
   },
   "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]
