@@ -5,11 +5,12 @@ import type { TuiCitation, TuiContextItem } from '../types';
 export function ContextPanel(props: {
 	items?: TuiContextItem[];
 	citations?: TuiCitation[];
+	focused?: boolean;
 }) {
 	const items = props.items ?? [];
 	const cites = props.citations ?? [];
 	return (
-		<Section title="Context / Citations">
+		<Section focused={props.focused} title="Context / Citations">
 			<Box flexDirection="column">
 				<Text bold>Included</Text>
 				{items.length === 0 ? (

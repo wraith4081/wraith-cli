@@ -2,10 +2,16 @@ import { Box, Text } from 'ink';
 import { Section, SmallDim } from '../layout';
 import type { TuiApproval } from '../types';
 
-export function ApprovalsPanel({ approvals }: { approvals?: TuiApproval[] }) {
+export function ApprovalsPanel({
+	approvals,
+	focused,
+}: {
+	approvals?: TuiApproval[];
+	focused?: boolean;
+}) {
 	const list = approvals ?? [];
 	return (
-		<Section title="Tool Approvals">
+		<Section focused={focused} title="Tool Approvals">
 			{list.length === 0 ? (
 				<SmallDim>no pending tool calls</SmallDim>
 			) : (

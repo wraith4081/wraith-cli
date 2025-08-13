@@ -2,10 +2,16 @@ import { Box, Text } from 'ink';
 import { Section, SmallDim } from '../layout';
 import type { TuiRuleSection } from '../types';
 
-export function RulesPanel({ sections }: { sections?: TuiRuleSection[] }) {
+export function RulesPanel({
+	sections,
+	focused,
+}: {
+	sections?: TuiRuleSection[];
+	focused?: boolean;
+}) {
 	const list = sections ?? [];
 	return (
-		<Section title="Rules">
+		<Section focused={focused} title="Rules">
 			{list.length === 0 ? (
 				<SmallDim>none</SmallDim>
 			) : (

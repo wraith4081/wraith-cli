@@ -2,10 +2,16 @@ import { Box, Text } from 'ink';
 import { Section, SmallDim } from '../layout';
 import type { TuiDiffEntry } from '../types';
 
-export function DiffsPanel({ diffs }: { diffs?: TuiDiffEntry[] }) {
+export function DiffsPanel({
+	diffs,
+	focused,
+}: {
+	diffs?: TuiDiffEntry[];
+	focused?: boolean;
+}) {
 	const list = diffs ?? [];
 	return (
-		<Section title="Diffs / Checkpoints">
+		<Section focused={focused} title="Diffs / Checkpoints">
 			{list.length === 0 ? (
 				<SmallDim>none</SmallDim>
 			) : (

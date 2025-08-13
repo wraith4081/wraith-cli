@@ -4,12 +4,15 @@ import type React from 'react';
 export function Section({
 	title,
 	children,
-}: React.PropsWithChildren<{ title: string }>) {
+	focused,
+}: React.PropsWithChildren<{ title: string; focused?: boolean }>) {
 	return (
 		<Box flexDirection="column" paddingX={1} paddingY={0}>
 			<Text>
-				<Text color="gray">── </Text>
-				<Text bold>{title}</Text>
+				<Text color={focused ? 'cyan' : 'gray'}>── </Text>
+				<Text bold color={focused ? 'cyan' : undefined}>
+					{title}
+				</Text>
 				<Text color="gray">
 					{' '}
 					─────────────────────────────────────────

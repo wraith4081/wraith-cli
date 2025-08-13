@@ -2,10 +2,16 @@ import { Box, Text } from 'ink';
 import { Section, SmallDim } from '../layout';
 import type { TuiStatus } from '../types';
 
-export function StatusPanel({ status }: { status?: TuiStatus }) {
+export function StatusPanel({
+	status,
+	focused,
+}: {
+	status?: TuiStatus;
+	focused?: boolean;
+}) {
 	const s = status ?? {};
 	return (
-		<Section title="Status / Usage">
+		<Section focused={focused} title="Status / Usage">
 			<Box flexDirection="column">
 				<Text>
 					Model: <Text bold>{s.model ?? 'unknown'}</Text>

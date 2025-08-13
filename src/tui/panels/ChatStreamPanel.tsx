@@ -1,9 +1,14 @@
 import { Box, Text } from 'ink';
-import { Section } from '../layout';
+import { Section, SmallDim } from '../layout';
 
-export function ChatStreamPanel(props: { input?: string; response?: string }) {
+export function ChatStreamPanel(props: {
+	input?: string;
+	response?: string;
+	streaming?: boolean;
+	focused?: boolean;
+}) {
 	return (
-		<Section title="Chat">
+		<Section focused={props.focused} title="Chat">
 			<Box flexDirection="column">
 				{props.input ? (
 					<Box flexDirection="column" marginBottom={1}>
@@ -12,7 +17,10 @@ export function ChatStreamPanel(props: { input?: string; response?: string }) {
 					</Box>
 				) : null}
 				<Box flexDirection="column">
-					<Text color="magenta">assistant ▸</Text>
+					<Text color="magenta">
+						assistant ▸{' '}
+						{props.streaming ? <SmallDim>…</SmallDim> : null}
+					</Text>
 					<Text wrap="wrap">{props.response ?? '…'}</Text>
 				</Box>
 			</Box>
