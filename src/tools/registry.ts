@@ -1,4 +1,5 @@
 import {
+	ToolError,
 	ToolExecutionError,
 	ToolNotFoundError,
 	ToolPermissionError,
@@ -144,6 +145,10 @@ export class ToolRegistry {
 			const res = await reg.handler(params, ctx);
 			return res as T;
 		} catch (e) {
+			if (e instanceof ToolError) {
+				throw e;
+			}
+
 			throw new ToolExecutionError(name, e);
 		}
 	}
