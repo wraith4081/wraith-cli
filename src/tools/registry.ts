@@ -6,7 +6,6 @@ import {
 	ToolValidationError,
 } from '@tools/errors';
 import type {
-	Permission,
 	RegisteredTool,
 	ToolContext,
 	ToolHandler,
@@ -17,19 +16,6 @@ import type { AjvLike } from '@tools/validator';
 import { formatAjvErrors, makeAjv } from '@tools/validator';
 
 type ValidatorFn = (data: unknown) => boolean;
-
-function toSet<T extends string>(arr?: T[]): Set<T> {
-	return new Set(arr ?? []);
-}
-
-function hasIntersection<T>(a: Set<T>, b: Set<T>): boolean {
-	for (const x of a) {
-		if (b.has(x)) {
-			return true;
-		}
-	}
-	return false;
-}
 
 export class ToolRegistry {
 	private readonly ajv: AjvLike;
@@ -66,51 +52,40 @@ export class ToolRegistry {
 		return t;
 	}
 
-	private ensureAllowed(
-		name: string,
-		spec: ToolSpec,
-		policy: ToolPolicy
-	): void {
-		const allowList = toSet(policy.allowedTools);
-		const denyList = toSet(policy.deniedTools);
-		if (denyList.has(name)) {
+	private ensureAllowed(name: string, spec: ToolSpec, policy?: ToolPolicy) {
+		const deniedTools = new Set(policy?.deniedTools ?? []);
+		if (deniedTools.has(name)) {
 			throw new ToolPermissionError(
 				name,
-				'tool is explicitly denied by policy'
-			);
-		}
-		if (allowList.size > 0 && !allowList.has(name)) {
-			throw new ToolPermissionError(name, 'tool is not in allowedTools');
-		}
-
-		const required = toSet(
-			spec.requiredPermissions as Permission[] | undefined
-		);
-		if (required.size === 0) {
-			return;
-		}
-
-		const denies = toSet(
-			policy.denyPermissions as Permission[] | undefined
-		);
-		if (hasIntersection(required, denies)) {
-			throw new ToolPermissionError(
-				name,
-				`requires denied permission(s): ${Array.from(required)
-					.filter((p) => denies.has(p))
-					.join(', ')}`
+				`Tool denied by policy: ${name}`
 			);
 		}
 
-		const allows = toSet(
-			policy.allowPermissions as Permission[] | undefined
-		);
-		if (allows.size > 0) {
-			for (const p of required) {
-				if (!allows.has(p)) {
+		if (policy?.allowedTools) {
+			const allowedTools = new Set(policy.allowedTools);
+			if (!allowedTools.has(name)) {
+				throw new ToolPermissionError(
+					name,
+					`Tool not allowed by policy: ${name}`
+				);
+			}
+		}
+
+		const req = new Set(spec.requiredPermissions ?? []);
+		const denyPerms = new Set(policy?.denyPermissions ?? []);
+		for (const p of req) {
+			if (denyPerms.has(p)) {
+				throw new ToolPermissionError(name, `Permission denied: ${p}`);
+			}
+		}
+
+		if (policy?.allowPermissions) {
+			const allowPerms = new Set(policy.allowPermissions);
+			for (const p of req) {
+				if (!allowPerms.has(p)) {
 					throw new ToolPermissionError(
 						name,
-						`missing required permission '${p}' in allowPermissions`
+						`Permission not granted: ${p}`
 					);
 				}
 			}
