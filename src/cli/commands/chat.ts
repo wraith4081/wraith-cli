@@ -1,4 +1,4 @@
-import readline from 'node:readline';
+import { createInterface } from 'node:readline';
 import { startChatSession } from '@core/orchestrator';
 import { type RenderMode, renderText } from '@render/index';
 
@@ -21,7 +21,7 @@ export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
 	const render: RenderMode = opts.render ?? 'markdown';
 	const streamable = render === 'markdown';
 
-	const rl = readline.createInterface({
+	const rl = createInterface({
 		input: process.stdin,
 		output: process.stdout,
 		historySize: 1000,
@@ -51,7 +51,9 @@ export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
 	}
 
 	process.stdout.write(
-		`chat started (model: ${session.model}${session.profile ? `, profile: ${session.profile}` : ''})\n`
+		`chat started (model: ${session.model}${
+			session.profile ? `, profile: ${session.profile}` : ''
+		}, render: ${render})\n`
 	);
 	process.stdout.write('Type /exit to quit.\n');
 

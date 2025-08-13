@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { type AskResult, runAsk } from '@core/orchestrator';
 import { runAskStructured } from '@core/structured';
@@ -17,19 +18,24 @@ export interface AskCliOptions {
 	// structured mode
 	output?: 'text' | 'json'; // when 'json', requires --schema
 	schemaPath?: string;
+	attempts?: number; // structured attempts/repair loop
+	repair?: boolean; // shorthand: enable a few repair attempts
 
 	// one-off prompt shaping
 	systemOverride?: string; // appended to system prompt as "Command Overrides"
 	instructions?: string; // injected as a preliminary user message (before main prompt)
+
+	// prompt source
+	filePath?: string; // read prompt from a file (alternative to "-")
+
+	// misc
+	meta?: boolean; // print model/elapsed to stderr in non-JSON mode
 }
 
 export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 	const startedAt = Date.now();
 
-	const prompt =
-		opts.prompt === '-'
-			? await readAllFromStdin()
-			: String(opts.prompt ?? '');
+	const prompt = await resolvePromptSource(opts);
 
 	// Structured mode takes precedence and produces ONLY the validated JSON on success
 	const structured = (opts.output ?? 'text') === 'json';
@@ -41,13 +47,21 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 				opts.json ?? false
 			);
 		}
+		const attempts = normalizeAttempts(
+			typeof opts.attempts === 'number'
+				? opts.attempts
+				: opts.repair
+					? 3
+					: 1
+		);
+
 		try {
 			const res = await runAskStructured({
 				prompt,
 				schemaPath: path.resolve(opts.schemaPath),
 				modelFlag: opts.modelFlag,
 				profileFlag: opts.profileFlag,
-				maxAttempts: 1,
+				maxAttempts: attempts,
 			});
 			if (res.ok) {
 				process.stdout.write(`${JSON.stringify(res.data)}\n`);
@@ -108,6 +122,9 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 			if (!streamed.endsWith('\n')) {
 				process.stdout.write('\n');
 			}
+			if (opts.meta) {
+				printMeta(result);
+			}
 			return 0;
 		}
 
@@ -115,6 +132,9 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 		process.stdout.write(rendered);
 		if (!rendered.endsWith('\n')) {
 			process.stdout.write('\n');
+		}
+		if (opts.meta) {
+			printMeta(result);
 		}
 		return 0;
 	} catch (err) {
@@ -167,6 +187,15 @@ export function registerAskCommand(program: unknown): void {
 				'JSON/YAML schema file for structured output'
 			)
 			.option(
+				'--attempts <n>',
+				'Structured mode max attempts (repair loop)',
+				'1'
+			)
+			.option(
+				'--repair',
+				'Enable basic schema repair loop (≈ attempts=3)'
+			)
+			.option(
 				'--system <text>',
 				'Append a system section just for this command'
 			)
@@ -174,6 +203,11 @@ export function registerAskCommand(program: unknown): void {
 				'--instructions <text>',
 				'Add a user-scoped instruction before the prompt'
 			)
+			.option(
+				'--file <path>',
+				'Read prompt from file (alternative to "-" for stdin)'
+			)
+			.option('--meta', 'Print model + elapsed timing to stderr')
 			.action(async (prompt: string, flags: Record<string, unknown>) => {
 				const code = await handleAskCommand({
 					prompt,
@@ -184,8 +218,12 @@ export function registerAskCommand(program: unknown): void {
 					render: toRender(flags.render),
 					output: toOutput(flags.output),
 					schemaPath: toOpt(flags.schema),
+					attempts: toInt(flags.attempts),
+					repair: Boolean(flags.repair),
 					systemOverride: toOpt(flags.system),
 					instructions: toOpt(flags.instructions),
+					filePath: toOpt(flags.file),
+					meta: Boolean(flags.meta),
 				});
 				process.exitCode = code;
 			});
@@ -214,13 +252,24 @@ export function registerAskCommand(program: unknown): void {
 			'JSON/YAML schema file for structured output'
 		)
 		.option(
+			'--attempts <n>',
+			'Structured mode max attempts (repair loop)',
+			'1'
+		)
+		.option('--repair', 'Enable basic schema repair loop (≈ attempts=3)')
+		.option(
 			'--system <text>',
 			'Append a system section just for this command'
 		)
 		.option(
 			'--instructions <text>',
 			'Add a user-scoped instruction before the prompt'
-		);
+		)
+		.option(
+			'--file <path>',
+			'Read prompt from file (alternative to "-" for stdin)'
+		)
+		.option('--meta', 'Print model + elapsed timing to stderr');
 
 	cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
 		const code = await handleAskCommand({
@@ -232,8 +281,12 @@ export function registerAskCommand(program: unknown): void {
 			render: toRender(flags.render),
 			output: toOutput(flags.output),
 			schemaPath: toOpt(flags.schema),
+			attempts: toInt(flags.attempts),
+			repair: Boolean(flags.repair),
 			systemOverride: toOpt(flags.system),
 			instructions: toOpt(flags.instructions),
+			filePath: toOpt(flags.file),
+			meta: Boolean(flags.meta),
 		});
 		process.exitCode = code;
 	});
@@ -250,6 +303,10 @@ function toOutput(v: unknown): 'text' | 'json' {
 	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
 	return s === 'json' ? 'json' : 'text';
 }
+function toInt(v: unknown): number | undefined {
+	const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
+	return Number.isFinite(n) && n > 0 ? n : undefined;
+}
 async function readAllFromStdin(): Promise<string> {
 	const chunks: Buffer[] = [];
 	for await (const c of process.stdin) {
@@ -257,7 +314,6 @@ async function readAllFromStdin(): Promise<string> {
 	}
 	return Buffer.concat(chunks).toString('utf8');
 }
-
 function emitError(msg: string, startedAt: number, asJson: boolean): number {
 	if (asJson) {
 		const out = {
@@ -270,6 +326,20 @@ function emitError(msg: string, startedAt: number, asJson: boolean): number {
 	}
 	process.stderr.write(`${msg}\n`);
 	return 1;
+}
+function normalizeAttempts(n?: number): number {
+	if (!(n && Number.isFinite(n)) || n < 1) {
+		return 1;
+	}
+	if (n > 5) {
+		return 5;
+	}
+	return Math.floor(n);
+}
+function printMeta(res: AskResult): void {
+	const ms = res.timing?.elapsedMs ?? 0;
+	const model = res.model ?? 'unknown';
+	process.stderr.write(`[meta] model=${model} elapsed=${ms}ms\n`);
 }
 
 export function formatAskJsonOk(res: AskResult) {
@@ -290,4 +360,18 @@ export function formatAskJsonErr(err: unknown, startedAt: number) {
 			? { message: err.message }
 			: { message: String(err) };
 	return { ok: false as const, error, timing: { startedAt, elapsedMs } };
+}
+
+async function resolvePromptSource(opts: AskCliOptions): Promise<string> {
+	if (opts.prompt === '-') {
+		return await readAllFromStdin();
+	}
+	if (opts.filePath) {
+		try {
+			return fs.readFileSync(path.resolve(opts.filePath), 'utf8');
+		} catch {
+			// fall back to literal prompt if file missing
+		}
+	}
+	return String(opts.prompt ?? '');
 }
