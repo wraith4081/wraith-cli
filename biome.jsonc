@@ -17,6 +17,9 @@
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": "off"
+      },
+      "suspicious": {
+        "noArrayIndexKey": "off"
       }
     }
   },
