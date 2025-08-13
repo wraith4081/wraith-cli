@@ -1,32 +1,28 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { HotIndex } from '@rag/hot-index';
-import { retrieveByEmbedding } from '@rag/retrieval';
-import type { ChunkEmbedding, ColdIndexDriver } from '@rag/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { HotIndexLike } from '@rag/retrieval';
+import { retrieveSimilar } from '@rag/retrieval';
+import type {
+	ChunkEmbedding,
+	ColdIndexDriver,
+	RetrievedChunk,
+} from '@rag/types';
+import { describe, expect, it } from 'vitest';
 
-function mkTmpDir(prefix = 'wraith-retrieval-') {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-function emb(
+function mkChunk(
 	id: string,
-	vector: number[],
-	model = 'm1',
-	filePath = 'src/doc.md',
-	startLine = 1,
-	endLine = 20
-): ChunkEmbedding {
-	return {
+	filePath: string,
+	startLine: number,
+	endLine: number,
+	score: number
+): RetrievedChunk {
+	const emb: ChunkEmbedding = {
 		id,
 		filePath,
 		startLine,
 		endLine,
-		model,
-		vector,
-		dim: vector.length,
-		tokensEstimated: 12,
+		model: 'text-embedding-3-large',
+		vector: [1, 0, 0],
+		dim: 3,
+		tokensEstimated: 10,
 		chunkRef: {
 			filePath,
 			startLine,
@@ -35,117 +31,115 @@ function emb(
 			chunkCount: 1,
 			sha256: id,
 			content: '',
-			tokensEstimated: 12,
+			tokensEstimated: 10,
 			fileType: 'text',
 		},
 	};
+	return { chunk: emb, score, source: 'hot' };
 }
 
-function makeColdDriver(
-	name: string,
-	results: Array<{ score: number; chunk: ChunkEmbedding }>
-): ColdIndexDriver {
-	return {
-		name,
-		async upsert() {
-			// biome-ignore lint/suspicious/noExplicitAny: tbd
-			return (await Promise.resolve(0)) as any;
-		},
-		async queryByVector() {
-			return await Promise.resolve(results);
-		},
-	};
+class HotFake implements HotIndexLike {
+	private hits: RetrievedChunk[];
+	constructor(hits: RetrievedChunk[]) {
+		this.hits = hits;
+	}
+	async search(): Promise<RetrievedChunk[]> {
+		return await Promise.resolve(this.hits.slice());
+	}
 }
 
-describe('retrieval pipeline (hot-first then cold, merge/dedupe, promotion)', () => {
-	let tmp: string;
+class ColdFake implements ColdIndexDriver {
+	private hits: RetrievedChunk[];
+	constructor(hits: RetrievedChunk[]) {
+		this.hits = hits;
+	}
+	async init(): Promise<void> {
+		return await Promise.resolve();
+	}
+	// upsert/delete not used in tests
+	async upsert(): Promise<number> {
+		return await Promise.resolve(0);
+	}
+	async deleteByIds(): Promise<number> {
+		return await Promise.resolve(0);
+	}
+	async search(): Promise<RetrievedChunk[]> {
+		return await Promise.resolve(this.hits.slice());
+	}
+	async close(): Promise<void> {
+		return await Promise.resolve();
+	}
+}
 
-	beforeEach(() => {
-		tmp = mkTmpDir();
-	});
-
-	afterEach(() => {
-		fs.rmSync(tmp, { recursive: true, force: true });
-	});
-
-	it('queries cold when hot is insufficient and promotes cold winners into hot', async () => {
-		const hot = new HotIndex({ dir: tmp, autosave: false, maxSize: 10 });
-
-		// Hot is empty -> forces cold query due to minResults
-		const cold = makeColdDriver('mock', [
-			{ score: 0.9, chunk: emb('X', [1, 0], 'm1', 'src/x.ts') },
-			{ score: 0.8, chunk: emb('Y', [0, 1], 'm1', 'src/y.ts') },
+describe('retrieveSimilar()', () => {
+	it('returns hot-only when hotMin satisfied', async () => {
+		const hot = new HotFake([
+			mkChunk('a', 'A.ts', 1, 5, 0.98),
+			mkChunk('b', 'B.ts', 10, 20, 0.9),
 		]);
-
-		const res = await retrieveByEmbedding([1, 0], {
-			hot,
-			colds: [cold],
-			topKHot: 4,
-			topK: 2,
-			minResults: 2,
-			modelFilter: 'm1',
-			promoteFromCold: true,
-		});
-
-		expect(res.items.length).toBe(2);
-		expect(res.fromCold).toBe(2);
-		// promoted to hot
-		expect(hot.has('X')).toBeTruthy();
-		expect(hot.has('Y')).toBeTruthy();
+		const res = await retrieveSimilar(
+			[1, 0, 0],
+			{ hot, colds: [] },
+			{ topK: 2, hotMin: 2 }
+		);
+		expect(res.hits.map((h) => h.chunk.id)).toEqual(['a', 'b']);
+		expect(res.used).toEqual({ fromHot: 2, fromCold: 0 });
+		expect(res.citations[0]).toContain('A.ts:1-5 (via hot)');
 	});
 
-	it('prefers hot hit over cold duplicate (dedupe keeps higher score and marks source)', async () => {
-		const hot = new HotIndex({ dir: tmp, autosave: false, maxSize: 10 });
-		// Put an item in hot that's quite aligned with the query
-		hot.upsert([emb('DUP', [1, 0], 'm1', 'src/dup.md')]);
-
-		// Cold returns the same id but with lower score scenario
-		const cold = makeColdDriver('mock', [
-			{ score: 0.2, chunk: emb('DUP', [0.2, 0], 'm1', 'src/dup.md') },
-		]);
-
-		const res = await retrieveByEmbedding([1, 0], {
-			hot,
-			colds: [cold],
-			topKHot: 4,
-			topK: 3,
-			minResults: 1,
-			modelFilter: 'm1',
-		});
-
-		expect(res.items.length).toBeGreaterThan(0);
-		const top = res.items.find((i) => i.id === 'DUP');
-		expect(top).toBeTruthy();
-		expect(top?.source).toBe('hot');
-		expect(res.fromCold).toBe(0); // deduped
+	it('falls back to cold when hot insufficient', async () => {
+		const hot = new HotFake([mkChunk('a', 'A.ts', 1, 5, 0.92)]);
+		const cold1 = new ColdFake([mkChunk('c1', 'C.ts', 3, 8, 0.88)]);
+		const cold2 = new ColdFake([mkChunk('c2', 'D.ts', 4, 9, 0.86)]);
+		const res = await retrieveSimilar(
+			[1, 0, 0],
+			{ hot, colds: [cold1, cold2] },
+			{ topK: 3 }
+		);
+		expect(res.hits.length).toBe(3);
+		expect(res.used.fromHot).toBe(1);
+		expect(res.used.fromCold).toBe(2);
+		expect(res.citations.some((s) => s.endsWith('(via cold)'))).toBe(true);
 	});
 
-	it('respects model filter and score threshold', async () => {
-		const hot = new HotIndex({ dir: tmp, autosave: false, maxSize: 10 });
-		hot.upsert([emb('A', [0.1, 0.0], 'm2')]); // different model -> should be filtered out
+	it('dedupes by span and prefers hot on tie', async () => {
+		// same span appears in hot and cold with equal scores
+		const hot = new HotFake([mkChunk('hotX', 'X.ts', 2, 7, 0.9)]);
+		const cold = new ColdFake([mkChunk('coldY', 'X.ts', 2, 7, 0.9)]);
+		const res = await retrieveSimilar(
+			[1, 0, 0],
+			{ hot, colds: [cold] },
+			{ topK: 5, dedupeBy: 'span' }
+		);
+		expect(res.hits.length).toBe(1);
+		expect(res.hits[0].chunk.id).toBe('hotX');
+		expect(res.citations[0]).toBe('X.ts:2-7 (via hot)');
+	});
 
-		const cold = makeColdDriver('mock', [
-			{ score: 0.3, chunk: emb('B', [0.3, 0.0], 'm1') }, // below threshold -> drop
-			{ score: 0.7, chunk: emb('C', [0.7, 0.0], 'm1') }, // above threshold -> keep
-			{ score: 0.6, chunk: emb('D', [0.6, 0.0], 'm2') }, // wrong model -> drop
+	it('applies scoreThreshold across sources', async () => {
+		const hot = new HotFake([mkChunk('a', 'A.ts', 1, 5, 0.95)]);
+		const cold = new ColdFake([
+			mkChunk('ok', 'C.ts', 3, 8, 0.8),
+			mkChunk('low', 'D.ts', 4, 9, 0.49),
 		]);
+		const res = await retrieveSimilar(
+			[1, 0, 0],
+			{ hot, colds: [cold] },
+			{ topK: 5, scoreThreshold: 0.5 }
+		);
+		expect(res.hits.map((h) => h.chunk.id)).toEqual(['a', 'ok']);
+		expect(res.citations.every((c) => !c.includes('D.ts'))).toBe(true);
+	});
 
-		const res = await retrieveByEmbedding([1, 0], {
-			hot,
-			colds: [cold],
-			modelFilter: 'm1',
-			scoreThreshold: 0.5,
-			topKHot: 4,
-			topK: 5,
-			minResults: 2,
-			promoteFromCold: true,
-		});
-
-		const ids = res.items.map((i) => i.id);
-		expect(ids).toEqual(['C']); // only C passes both filters
-		expect(hot.has('C')).toBeTruthy(); // promoted
-		expect(hot.has('B')).toBeFalsy();
-		expect(hot.has('D')).toBeFalsy();
-		expect(hot.has('A')).toBeTruthy(); // still there, just filtered out by model
+	it('dedupes by id when requested', async () => {
+		const hot = new HotFake([mkChunk('same', 'P.ts', 1, 2, 0.7)]);
+		const cold = new ColdFake([mkChunk('same', 'Q.ts', 10, 12, 0.9)]);
+		const res = await retrieveSimilar(
+			[1, 0, 0],
+			{ hot, colds: [cold] },
+			{ topK: 5, dedupeBy: 'id' }
+		);
+		expect(res.hits.length).toBe(1);
+		expect(res.hits[0].chunk.filePath).toBe('Q.ts'); // higher score kept
 	});
 });
