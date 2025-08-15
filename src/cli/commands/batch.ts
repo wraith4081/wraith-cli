@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { runAsk as runAskOrchestrator } from '@core/orchestrator';
 import { isProviderError } from '@provider/types';
+import {
+	loadTemplateContent,
+	renderTemplate,
+	resolveTemplateByName,
+} from '@util/templates';
 import type { Command } from 'commander';
 
 type Plain = Record<string, unknown>;
@@ -18,6 +23,11 @@ export type BatchOptions = {
 	input?: string; // legacy
 	format?: 'csv' | 'jsonl'; // autodetect by extension when not provided
 	sep?: string; // CSV separator (default: ,)
+
+	// templates
+	template?: string; // name of a registered template
+	vars?: Record<string, string>; // default vars to merge into each row
+
 	// execution
 	failFast?: boolean;
 	concurrency?: number; // default 1
@@ -27,8 +37,11 @@ export type BatchOptions = {
 	backoffMs?: number; // wait per retry attempt (default 500)
 };
 
-export function parseJsonl(s: string): BatchInputItem[] {
-	const items: BatchInputItem[] = [];
+export function parseJsonl(
+	s: string,
+	requirePrompt = true
+): (BatchInputItem | Plain)[] {
+	const items: (BatchInputItem | Plain)[] = [];
 	const lines = s.split(/\r?\n/).filter((l) => l.trim().length > 0);
 	for (const line of lines) {
 		let obj: Plain;
@@ -41,18 +54,26 @@ export function parseJsonl(s: string): BatchInputItem[] {
 				}`
 			);
 		}
-		const prompt = String(obj.prompt ?? '');
-		if (!prompt.trim()) {
-			throw new Error(
-				`Missing "prompt" on line ${items.length + 1} (JSONL object must have a prompt field)`
-			);
+		if (requirePrompt) {
+			const prompt = String(obj.prompt ?? '');
+			if (!prompt.trim()) {
+				throw new Error(
+					`Missing "prompt" on line ${items.length + 1} (JSONL object must have a prompt field)`
+				);
+			}
+			items.push({ ...(obj as Plain), prompt });
+		} else {
+			items.push(obj);
 		}
-		items.push({ ...(obj as Plain), prompt });
 	}
 	return items;
 }
 
-export function parseCsv(s: string, sep = ','): BatchInputItem[] {
+export function parseCsv(
+	s: string,
+	sep = ',',
+	requirePrompt = true
+): (BatchInputItem | Plain)[] {
 	const rows = s
 		.split(/\r?\n/)
 		.map((l) => l.trimEnd())
@@ -64,24 +85,28 @@ export function parseCsv(s: string, sep = ','): BatchInputItem[] {
 
 	const header = safeSplitCsvRow(rows[0], sep);
 	const promptIdx = header.findIndex((h) => h.toLowerCase() === 'prompt');
-	if (promptIdx < 0) {
+	if (requirePrompt && promptIdx < 0) {
 		throw new Error('CSV must have a "prompt" column');
 	}
 
-	const out: BatchInputItem[] = [];
+	const out: (BatchInputItem | Plain)[] = [];
 	for (let i = 1; i < rows.length; i++) {
 		const cols = safeSplitCsvRow(rows[i], sep);
 		const record: Plain = {};
 		for (let c = 0; c < header.length; c++) {
 			record[header[c]] = cols[c] ?? '';
 		}
-		const prompt = String(record[header[promptIdx]] ?? '');
-		if (!prompt.trim()) {
-			throw new Error(
-				`Row ${i + 1}: missing prompt (column "${header[promptIdx]}")`
-			);
+		if (requirePrompt) {
+			const prompt = String(record[header[promptIdx]] ?? '');
+			if (!prompt.trim()) {
+				throw new Error(
+					`Row ${i + 1}: missing prompt (column "${header[promptIdx]}")`
+				);
+			}
+			out.push({ ...record, prompt });
+		} else {
+			out.push(record);
 		}
-		out.push({ ...record, prompt });
 	}
 	return out;
 }
@@ -174,19 +199,21 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 
 	const format = opts.format ?? inferred;
 	if (!format) {
-		// CLI-style: print to stderr and return non-zero
 		process.stderr.write(
 			'Unsupported input format: cannot infer from extension; pass --format csv|jsonl\n'
 		);
 		return 1;
 	}
 
-	let items: BatchInputItem[];
+	const useTemplate = Boolean(opts.template);
+	let rawItems: (BatchInputItem | Plain)[];
+
 	try {
-		items =
-			format === 'csv'
-				? parseCsv(text, opts.sep ?? ',')
-				: parseJsonl(text);
+		if (format === 'csv') {
+			rawItems = parseCsv(text, opts.sep ?? ',', !useTemplate);
+		} else {
+			rawItems = parseJsonl(text, !useTemplate);
+		}
 	} catch (e) {
 		const msg =
 			e instanceof Error ? e.message : String(e ?? 'Unknown error');
@@ -194,8 +221,21 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 		return 1;
 	}
 
-	if (items.length === 0) {
+	if (rawItems.length === 0) {
 		return 0;
+	}
+
+	let templateRaw: string | null = null;
+	let defaultVars: Record<string, string> = {};
+	if (useTemplate) {
+		const name = String(opts.template);
+		const meta = resolveTemplateByName(name);
+		if (!meta) {
+			process.stderr.write(`Unknown template: ${name}\n`);
+			return 1;
+		}
+		templateRaw = loadTemplateContent(meta);
+		defaultVars = opts.vars ?? {};
 	}
 
 	const concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
@@ -208,7 +248,7 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 		| { ok: true; answer: string }
 		| { ok: false; message: string };
 
-	const results: Outcome[] = new Array(items.length);
+	const results: Outcome[] = new Array(rawItems.length);
 	let failIndex: number | null = null;
 
 	let next = 0;
@@ -221,17 +261,38 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 						break;
 					}
 					const myIndex = next++;
-					if (myIndex >= items.length) {
+					if (myIndex >= rawItems.length) {
 						break;
 					}
 
-					const it = items[myIndex];
+					const rec = rawItems[myIndex];
 					try {
+						let prompt: string;
+						if (useTemplate) {
+							// merge per-row vars with defaults; row wins
+							const vars: Record<string, string> = {
+								...defaultVars,
+								...normalizeVars(rec),
+							};
+							const { output, missing } = renderTemplate(
+								templateRaw as string,
+								vars
+							);
+							if (missing && missing.length > 0) {
+								throw new Error(
+									`Missing template vars: ${missing.join(', ')}`
+								);
+							}
+							prompt = output;
+						} else {
+							prompt = String((rec as BatchInputItem).prompt);
+						}
+
 						await limiter.wait();
 						const answer = await runWithRetry(
 							() =>
 								runAskOrchestrator({
-									prompt: String(it.prompt),
+									prompt,
 								}),
 							retries,
 							backoffMs
@@ -289,6 +350,20 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 	return anyFail ? 1 : 0;
 }
 
+function normalizeVars(obj: Plain): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(obj)) {
+		if (v == null) {
+			continue;
+		}
+		if (k === 'prompt') {
+			continue;
+		}
+		out[k] = typeof v === 'string' ? v : JSON.stringify(v);
+	}
+	return out;
+}
+
 async function runWithRetry<T>(
 	fn: () => Promise<T>,
 	retries: number,
@@ -344,6 +419,14 @@ export function registerBatchCommand(program: Command) {
 		.description('Run prompts in bulk from a CSV or JSONL file')
 		.option('--format <fmt>', 'csv|jsonl (default: by file extension)')
 		.option('--sep <char>', 'CSV separator (default: ,)', ',')
+		.option(
+			'--template <name>',
+			'Template name to render each row into a prompt'
+		)
+		.option(
+			'--vars <k=v;...>',
+			'Default template vars; e.g. name=Alice;lang=en (row values override)'
+		)
 		.option('--fail-fast', 'Stop at first failure', false)
 		.option('--concurrency <n>', 'Parallel requests (default: 1)', toInt)
 		.option('--rps <n>', 'Requests per second limit', toInt)
@@ -364,6 +447,9 @@ export function registerBatchCommand(program: Command) {
 			filePath: file,
 			format: toFmt(flags.format),
 			sep: typeof flags.sep === 'string' ? flags.sep : ',',
+			template:
+				typeof flags.template === 'string' ? flags.template : undefined,
+			vars: parseVarsFlag(flags.vars),
 			failFast: flags.failFast === true,
 			concurrency: toInt(flags.concurrency),
 			rps: toInt(flags.rps),
@@ -383,4 +469,29 @@ function toInt(v: unknown): number | undefined {
 function toFmt(v: unknown): 'csv' | 'jsonl' | undefined {
 	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
 	return s === 'csv' || s === 'jsonl' ? s : undefined;
+}
+
+function parseVarsFlag(v: unknown): Record<string, string> | undefined {
+	if (!v) {
+		return;
+	}
+	const s = Array.isArray(v) ? v.join(';') : String(v);
+	const pairs = s
+		.split(/[;,]/)
+		.map((p) => p.trim())
+		.filter(Boolean);
+	const out: Record<string, string> = {};
+	for (const p of pairs) {
+		const eq = p.indexOf('=');
+		if (eq < 0) {
+			continue;
+		}
+		const k = p.slice(0, eq).trim();
+		const val = p.slice(eq + 1).trim();
+		if (!k) {
+			continue;
+		}
+		out[k] = val;
+	}
+	return Object.keys(out).length ? out : undefined;
 }
