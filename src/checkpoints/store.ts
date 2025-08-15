@@ -5,8 +5,6 @@ import { buildIgnoreFilterFromConfig } from '@ingest/ignore';
 import { loadConfig } from '@store/config';
 import { checkpointsDir as staticCheckpointsDir } from '@util/paths';
 
-type Plain = Record<string, unknown>;
-
 export interface CheckpointFile {
 	path: string; // posix relative
 	size: number;
@@ -79,9 +77,26 @@ function realCheckpointsDir(): string {
 	return dyn;
 }
 
+function isBinaryBuffer(buf: Buffer): boolean {
+	if (buf.includes(0)) {
+		return true;
+	}
+	let nonPrintable = 0;
+	const n = Math.min(buf.length, 8192);
+	for (let i = 0; i < n; i++) {
+		const c = buf[i];
+		const printable =
+			c === 0x09 || c === 0x0a || c === 0x0d || (c >= 0x20 && c <= 0x7e);
+		if (!printable) {
+			nonPrintable++;
+		}
+	}
+	return nonPrintable / Math.max(1, n) > 0.3;
+}
+
 function listAllFiles(
 	root: string,
-	extraIgnore: (p: string, isDir?: boolean) => boolean
+	extraFilter: (rel: string, isDir?: boolean) => boolean
 ): string[] {
 	const out: string[] = [];
 	const walk = (dir: string) => {
@@ -93,18 +108,19 @@ function listAllFiles(
 		}
 		for (const e of entries) {
 			const abs = path.join(dir, e.name);
-			let lst: fs.Stats | fs.BigIntStats | undefined;
+			let lst: fs.Stats | undefined;
 			try {
 				lst = fs.lstatSync(abs);
 			} catch {
 				continue;
 			}
 			if (lst.isSymbolicLink()) {
-				continue; // skip symlinks
+				continue;
 			}
 			const isDir = lst.isDirectory();
 			const rel = path.relative(root, abs);
-			if (!extraIgnore(rel, isDir)) {
+			const posix = toPosix(rel);
+			if (!extraFilter(posix, isDir)) {
 				continue;
 			}
 			if (isDir) {
@@ -128,16 +144,12 @@ export async function createCheckpoint(
 }> {
 	const { merged } = loadConfig();
 	const baseFilter = buildIgnoreFilterFromConfig(rootDir, merged);
-	const filter = (relOrAbs: string, isDir?: boolean) => {
-		const rel = path.isAbsolute(relOrAbs)
-			? path.relative(rootDir, relOrAbs)
-			: relOrAbs;
+	const filter = (posixRel: string, isDir?: boolean) => {
 		// Force-exclude the checkpoints directory to avoid recursive snapshots.
-		const posix = toPosix(rel);
-		if (posix.startsWith('.wraith/checkpoints/')) {
+		if (posixRel.startsWith('.wraith/checkpoints/')) {
 			return false;
 		}
-		return baseFilter(rel, isDir);
+		return baseFilter(posixRel, isDir);
 	};
 
 	const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -192,8 +204,23 @@ export async function createCheckpoint(
 	return await Promise.resolve({ dir, manifestPath, meta: manifest.meta });
 }
 
-function findCheckpointDirByPrefix(prefix: string): string {
-	const dir = realCheckpointsDir();
+function checkpointsRoot(): string {
+	return realCheckpointsDir();
+}
+
+export function listCheckpointDirs(): string[] {
+	try {
+		return fs
+			.readdirSync(checkpointsRoot(), { withFileTypes: true })
+			.filter((d) => d.isDirectory())
+			.map((d) => path.join(checkpointsRoot(), d.name));
+	} catch {
+		return [];
+	}
+}
+
+export function findCheckpointDirByPrefix(prefix: string): string {
+	const dir = checkpointsRoot();
 	let entries: string[] = [];
 	try {
 		entries = fs
@@ -206,12 +233,35 @@ function findCheckpointDirByPrefix(prefix: string): string {
 	if (entries.length === 0) {
 		throw new Error(`No checkpoints directory found at ${dir}`);
 	}
-	// Match by prefix of directory name (which starts with id)
+	// Exact first, then prefix
+	const exact = entries.find((e) => e === prefix);
+	if (exact) {
+		return path.join(dir, exact);
+	}
 	const match = entries.find((e) => e.startsWith(prefix));
 	if (!match) {
 		throw new Error(`Checkpoint not found for: ${prefix}`);
 	}
 	return path.join(dir, match);
+}
+
+export function loadCheckpointManifest(idOrPrefix: string): {
+	dir: string;
+	manifest: CheckpointManifestV1;
+} {
+	const cdir = findCheckpointDirByPrefix(idOrPrefix);
+	const manifestPath = path.join(cdir, 'manifest.json');
+	const manifest = JSON.parse(
+		fs.readFileSync(manifestPath, 'utf8')
+	) as CheckpointManifestV1;
+	if (
+		manifest.version !== 1 ||
+		!manifest.meta ||
+		!Array.isArray(manifest.files)
+	) {
+		throw new Error(`Invalid checkpoint manifest: ${manifestPath}`);
+	}
+	return { dir: cdir, manifest };
 }
 
 export async function restoreCheckpoint(
@@ -225,18 +275,8 @@ export async function restoreCheckpoint(
 	overwrites: string[];
 	backupDir?: string;
 }> {
-	const cdir = findCheckpointDirByPrefix(idOrPrefix);
-	const manifestPath = path.join(cdir, 'manifest.json');
-	const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as Plain;
-	if (raw.version !== 1 || !raw.meta || !Array.isArray(raw.files)) {
-		throw new Error(`Invalid checkpoint manifest: ${manifestPath}`);
-	}
-	const meta = raw.meta as CheckpointManifestV1['meta'];
-	const files = (raw.files as Plain[]).map((f) => ({
-		path: String(f.path),
-		size: Number(f.size),
-		sha256: String(f.sha256),
-	}));
+	const { dir: cdir, manifest } = loadCheckpointManifest(idOrPrefix);
+	const files = manifest.files;
 
 	const filesRoot = path.join(cdir, 'files');
 	const overwrites: string[] = [];
@@ -248,8 +288,8 @@ export async function restoreCheckpoint(
 	}
 	if (opts.dryRun) {
 		return await Promise.resolve({
-			checkpointId: meta.id,
-			label: meta.label,
+			checkpointId: manifest.meta.id,
+			label: manifest.meta.label,
 			restored: files.length,
 			overwrites,
 		});
@@ -263,9 +303,9 @@ export async function restoreCheckpoint(
 	let backupDir: string | undefined;
 	if (overwrites.length > 0) {
 		backupDir = path.join(
-			realCheckpointsDir(),
+			checkpointsRoot(),
 			'_restore-backups',
-			`${meta.id}-${randId(3)}`
+			`${manifest.meta.id}-${randId(3)}`
 		);
 		ensureDir(backupDir);
 	}
@@ -303,10 +343,59 @@ export async function restoreCheckpoint(
 	}
 
 	return await Promise.resolve({
-		checkpointId: meta.id,
-		label: meta.label,
+		checkpointId: manifest.meta.id,
+		label: manifest.meta.label,
 		restored: files.length,
 		overwrites,
 		backupDir,
 	});
+}
+
+/** Utilities exported for diffing logic */
+export function snapshotWorktree(rootDir: string): {
+	files: Map<string, { size: number; content: Buffer; binary: boolean }>;
+} {
+	const { merged } = loadConfig();
+	const baseFilter = buildIgnoreFilterFromConfig(rootDir, merged);
+	const filter = (posixRel: string, isDir?: boolean) => {
+		if (posixRel.startsWith('.wraith/checkpoints/')) {
+			return false;
+		}
+		return baseFilter(posixRel, isDir);
+	};
+	const absFiles = listAllFiles(rootDir, filter);
+	const map = new Map<
+		string,
+		{ size: number; content: Buffer; binary: boolean }
+	>();
+	for (const abs of absFiles) {
+		const rel = path.relative(rootDir, abs);
+		const posix = toPosix(rel);
+		const buf = fs.readFileSync(abs);
+		map.set(posix, {
+			size: buf.length,
+			content: buf,
+			binary: isBinaryBuffer(buf),
+		});
+	}
+	return { files: map };
+}
+
+export function snapshotFromCheckpoint(checkpointDirOrPrefix: string): {
+	id: string;
+	label?: string;
+	files: Map<string, { size: number; content: Buffer; binary: boolean }>;
+} {
+	const { dir, manifest } = loadCheckpointManifest(checkpointDirOrPrefix);
+	const filesRoot = path.join(dir, 'files');
+	const map = new Map<
+		string,
+		{ size: number; content: Buffer; binary: boolean }
+	>();
+	for (const f of manifest.files) {
+		const abs = path.join(filesRoot, f.path.split('/').join(path.sep));
+		const buf = fs.readFileSync(abs);
+		map.set(f.path, { size: buf.length, content: buf, binary: false }); // binary flag recomputed by consumer if needed
+	}
+	return { id: manifest.meta.id, label: manifest.meta.label, files: map };
 }
