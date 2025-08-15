@@ -25,6 +25,7 @@ export default defineConfig({
 			'@tools': path.resolve(__dirname, 'src/tools'),
 			'@render': path.resolve(__dirname, 'src/render'),
 			'@sessions': path.resolve(__dirname, 'src/sessions'),
+			'@checkpoints': path.resolve(__dirname, 'src/checkpoints'),
 		},
 	},
 });

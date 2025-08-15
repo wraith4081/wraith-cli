@@ -23,7 +23,8 @@
       "@rag/*": ["src/rag/*"],
       "@tools/*": ["src/tools/*"],
       "@render/*": ["src/render/*"],
-      "@sessions/*": ["src/sessions/*"]
+      "@sessions/*": ["src/sessions/*"],
+      "@checkpoints/*": ["src/checkpoints/*"]
     }
   },
   "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]
