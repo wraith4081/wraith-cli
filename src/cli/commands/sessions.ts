@@ -1,5 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+	buildTimelineFromSession,
+	findSessionFileByName,
+	loadSessionFile,
+	renderTimelineText,
+} from '@sessions/history';
 import { sessionsDir as staticSessionsDir } from '@util/paths';
 
 type Plain = Record<string, unknown>;
@@ -21,6 +27,94 @@ export interface SessionsExportOptions {
 
 function currentSessionsDir(): string {
 	return path.join(process.cwd(), '.wraith', 'sessions');
+}
+
+async function handleSessionsHistory(opts: {
+	nameOrPath: string;
+	json?: boolean;
+	limit?: number;
+}): Promise<number> {
+	try {
+		const dir = currentSessionsDir();
+		const file = findSessionFileByName(dir, opts.nameOrPath);
+		const session = loadSessionFile(file);
+		const events = buildTimelineFromSession(session);
+
+		if (opts.json) {
+			const out = {
+				ok: true as const,
+				file,
+				events,
+			};
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return await Promise.resolve(0);
+		}
+
+		const text = renderTimelineText(events, opts.limit);
+		process.stdout.write(text.length ? `${text}\n` : '(no events)\n');
+		return await Promise.resolve(0);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`${msg}\n`);
+		return await Promise.resolve(1);
+	}
+}
+
+export function registerSessionsHistorySubcommand(program: unknown): void {
+	// biome-ignore lint/suspicious/noExplicitAny: CLI frameworks are duck-typed
+	const app: any = program;
+
+	if (
+		typeof app.command === 'function' &&
+		typeof app.option === 'function' &&
+		typeof app.action === 'function'
+	) {
+		app.command('sessions history <nameOrPath>')
+			.describe('Show a chronological timeline of a session')
+			.option('--json', 'Emit JSON timeline')
+			.option(
+				'--limit <n>',
+				'Show only the last N events',
+				Number.parseInt
+			)
+			.action(
+				async (nameOrPath: string, flags: Record<string, unknown>) => {
+					const code = await handleSessionsHistory({
+						nameOrPath,
+						json: flags.json === true,
+						limit:
+							typeof flags.limit === 'number' &&
+							Number.isFinite(flags.limit)
+								? (flags.limit as number)
+								: undefined,
+					});
+					process.exitCode = code;
+				}
+			);
+		return;
+	}
+
+	const cmd = app
+		.command('sessions history <nameOrPath>')
+		.description('Show a chronological timeline of a session')
+		.option('--json', 'Emit JSON timeline')
+		.option('--limit <n>', 'Show only the last N events');
+
+	cmd.action(async (nameOrPath: string, flags: Record<string, unknown>) => {
+		const lim =
+			typeof flags.limit === 'string'
+				? Number.parseInt(flags.limit, 10)
+				: undefined;
+		const code = await handleSessionsHistory({
+			nameOrPath,
+			json: flags.json === true,
+			limit:
+				typeof lim === 'number' && Number.isFinite(lim)
+					? lim
+					: undefined,
+		});
+		process.exitCode = code;
+	});
 }
 
 const INCLUDE_GLOBAL = process.env.WRAITH_SESSIONS_INCLUDE_GLOBAL === '1';
