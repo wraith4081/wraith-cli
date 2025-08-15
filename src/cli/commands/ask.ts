@@ -1,9 +1,12 @@
+/** biome-ignore-all lint/suspicious/noConsole: tbd */
+
 import fs from 'node:fs';
 import path from 'node:path';
 import { type AskResult, runAsk } from '@core/orchestrator';
 import { runAskStructured } from '@core/structured';
 import { isProviderError } from '@provider/types';
 import { type RenderMode, renderText } from '@render/index';
+import type { Command } from 'commander';
 
 export interface AskCliOptions {
 	prompt: string; // "-" to read from stdin
@@ -114,7 +117,6 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 		);
 
 		// Persist single-turn session if requested
-
 		if (opts.save) {
 			const { saveSessionFromAsk } = await import('@sessions/store');
 			saveSessionFromAsk({
@@ -170,87 +172,8 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 	}
 }
 
-export function registerAskCommand(program: unknown): void {
-	// biome-ignore lint/suspicious/noExplicitAny: CLI frameworks are duck-typed
-	const app: any = program;
-
-	// Try sade shape first
-	if (
-		typeof app.command === 'function' &&
-		typeof app.option === 'function' &&
-		typeof app.action === 'function'
-	) {
-		app.command('ask <prompt>')
-			.describe('Single question; prints the model response')
-			.option('-m, --model <id>', 'Override model id')
-			.option('-p, --profile <name>', 'Use profile defaults')
-			.option('--json', 'Output a JSON envelope (non-structured mode)')
-			.option(
-				'--no-stream',
-				'Disable streaming output (markdown only streams)'
-			)
-			.option(
-				'--render <mode>',
-				'Rendering: plain|markdown|ansi',
-				'markdown'
-			)
-			.option(
-				'--output <mode>',
-				'Output mode: text|json (use with --schema)',
-				'text'
-			)
-			.option(
-				'--schema <file>',
-				'JSON/YAML schema file for structured output'
-			)
-			.option(
-				'--attempts <n>',
-				'Structured mode max attempts (repair loop)',
-				'1'
-			)
-			.option(
-				'--repair',
-				'Enable basic schema repair loop (≈ attempts=3)'
-			)
-			.option(
-				'--system <text>',
-				'Append a system section just for this command'
-			)
-			.option(
-				'--instructions <text>',
-				'Add a user-scoped instruction before the prompt'
-			)
-			.option(
-				'--file <path>',
-				'Read prompt from file (alternative to "-" for stdin)'
-			)
-			.option('--save <name>', 'Save this turn as a session under <name>')
-			.option('--meta', 'Print model + elapsed timing to stderr')
-			.action(async (prompt: string, flags: Record<string, unknown>) => {
-				const code = await handleAskCommand({
-					prompt,
-					modelFlag: toOpt(flags.model),
-					profileFlag: toOpt(flags.profile),
-					save: toOpt(flags.save),
-					json: flags.json === true,
-					stream: flags.stream !== false,
-					render: toRender(flags.render),
-					output: toOutput(flags.output),
-					schemaPath: toOpt(flags.schema),
-					attempts: toInt(flags.attempts),
-					repair: Boolean(flags.repair),
-					systemOverride: toOpt(flags.system),
-					instructions: toOpt(flags.instructions),
-					filePath: toOpt(flags.file),
-					meta: Boolean(flags.meta),
-				});
-				process.exitCode = code;
-			});
-		return;
-	}
-
-	// Commander fallback
-	const cmd = app
+export function registerAskCommand(program: Command): void {
+	const cmd = program
 		.command('ask <prompt>')
 		.description('Single question; prints the model response')
 		.option('-m, --model <id>', 'Override model id')

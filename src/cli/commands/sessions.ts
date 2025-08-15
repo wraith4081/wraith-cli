@@ -7,6 +7,7 @@ import {
 	renderTimelineText,
 } from '@sessions/history';
 import { sessionsDir as staticSessionsDir } from '@util/paths';
+import type { Command } from 'commander';
 
 type Plain = Record<string, unknown>;
 
@@ -60,61 +61,32 @@ async function handleSessionsHistory(opts: {
 	}
 }
 
-export function registerSessionsHistorySubcommand(program: unknown): void {
-	// biome-ignore lint/suspicious/noExplicitAny: CLI frameworks are duck-typed
-	const app: any = program;
-
-	if (
-		typeof app.command === 'function' &&
-		typeof app.option === 'function' &&
-		typeof app.action === 'function'
-	) {
-		app.command('sessions history <nameOrPath>')
-			.describe('Show a chronological timeline of a session')
-			.option('--json', 'Emit JSON timeline')
-			.option(
-				'--limit <n>',
-				'Show only the last N events',
-				Number.parseInt
-			)
-			.action(
-				async (nameOrPath: string, flags: Record<string, unknown>) => {
-					const code = await handleSessionsHistory({
-						nameOrPath,
-						json: flags.json === true,
-						limit:
-							typeof flags.limit === 'number' &&
-							Number.isFinite(flags.limit)
-								? (flags.limit as number)
-								: undefined,
-					});
-					process.exitCode = code;
-				}
-			);
-		return;
-	}
-
-	const cmd = app
-		.command('sessions history <nameOrPath>')
+export function registerSessionsHistorySubcommand(program: Command): void {
+	const parent = getOrCreateSessionsParent(program);
+	parent
+		.command('history <nameOrPath>')
 		.description('Show a chronological timeline of a session')
 		.option('--json', 'Emit JSON timeline')
-		.option('--limit <n>', 'Show only the last N events');
-
-	cmd.action(async (nameOrPath: string, flags: Record<string, unknown>) => {
-		const lim =
-			typeof flags.limit === 'string'
-				? Number.parseInt(flags.limit, 10)
-				: undefined;
-		const code = await handleSessionsHistory({
-			nameOrPath,
-			json: flags.json === true,
-			limit:
-				typeof lim === 'number' && Number.isFinite(lim)
-					? lim
-					: undefined,
+		.option('--limit <n>', 'Show only the last N events', (v) =>
+			Number.parseInt(String(v), 10)
+		)
+		.action(async (nameOrPath: string, flags: Record<string, unknown>) => {
+			const lim =
+				typeof flags.limit === 'number'
+					? (flags.limit as number)
+					: typeof flags.limit === 'string'
+						? Number.parseInt(flags.limit, 10)
+						: undefined;
+			const code = await handleSessionsHistory({
+				nameOrPath,
+				json: flags.json === true,
+				limit:
+					typeof lim === 'number' && Number.isFinite(lim)
+						? lim
+						: undefined,
+			});
+			process.exitCode = code;
 		});
-		process.exitCode = code;
-	});
 }
 
 const INCLUDE_GLOBAL = process.env.WRAITH_SESSIONS_INCLUDE_GLOBAL === '1';
@@ -394,77 +366,64 @@ export async function handleSessionsExportCommand(
 	return await Promise.resolve(0);
 }
 
-export function registerSessionsCommands(program: unknown): void {
-	// biome-ignore lint/suspicious/noExplicitAny: CLI is duck-typed
-	const app: any = program;
+export function registerSessionsCommands(program: Command): void {
+	const parent = getOrCreateSessionsParent(program);
 
-	// biome-ignore lint/suspicious/noExplicitAny: tbd
-	const addList = (cmd: any) =>
-		cmd
-			.description('List saved sessions')
-			.option('--json', 'Emit JSON list')
-			.action(async (flags: Record<string, unknown>) => {
-				const code = await handleSessionsListCommand({
-					json: flags.json === true,
-				});
-				process.exitCode = code;
+	// sessions list
+	parent
+		.command('list')
+		.description('List saved sessions')
+		.option('--json', 'Emit JSON list')
+		.action(async (flags: Record<string, unknown>) => {
+			const code = await handleSessionsListCommand({
+				json: flags.json === true,
 			});
+			process.exitCode = code;
+		});
 
-	// biome-ignore lint/suspicious/noExplicitAny: tbd
-	const addShow = (cmd: any) =>
-		cmd
-			.description(
-				'Show a session summary (by name, id, or filename w/o .json)'
-			)
-			.option('--json', 'Emit JSON summary')
-			.action(
-				async (idOrName: string, flags: Record<string, unknown>) => {
-					const code = await handleSessionsShowCommand({
-						idOrName,
-						json: flags.json === true,
-					});
-					process.exitCode = code;
-				}
-			);
+	// sessions show <nameOrId>
+	parent
+		.command('show <nameOrId>')
+		.description(
+			'Show a session summary (by name, id, or filename w/o .json)'
+		)
+		.option('--json', 'Emit JSON summary')
+		.action(async (idOrName: string, flags: Record<string, unknown>) => {
+			const code = await handleSessionsShowCommand({
+				idOrName,
+				json: flags.json === true,
+			});
+			process.exitCode = code;
+		});
 
-	// biome-ignore lint/suspicious/noExplicitAny: tbd
-	const addExport = (cmd: any) =>
-		cmd
-			.description('Export a session as JSON or Markdown')
-			.option('--format <fmt>', 'json|md', 'json')
-			.option('--out <file>', 'Write to file; default stdout')
-			.action(
-				async (idOrName: string, flags: Record<string, unknown>) => {
-					const code = await handleSessionsExportCommand({
-						idOrName,
-						format:
-							typeof flags.format === 'string' &&
-							flags.format.toLowerCase().trim() === 'md'
-								? 'md'
-								: 'json',
-						outPath:
-							typeof flags.out === 'string'
-								? (flags.out as string)
-								: undefined,
-					});
-					process.exitCode = code;
-				}
-			);
+	// sessions export <nameOrId>
+	parent
+		.command('export <nameOrId>')
+		.description('Export a session as JSON or Markdown')
+		.option('--format <fmt>', 'json|md', 'json')
+		.option('--out <file>', 'Write to file; default stdout')
+		.action(async (idOrName: string, flags: Record<string, unknown>) => {
+			const code = await handleSessionsExportCommand({
+				idOrName,
+				format:
+					typeof flags.format === 'string' &&
+					String(flags.format).toLowerCase().trim() === 'md'
+						? 'md'
+						: 'json',
+				outPath:
+					typeof flags.out === 'string'
+						? (flags.out as string)
+						: undefined,
+			});
+			process.exitCode = code;
+		});
+}
 
-	// sade-style
-	if (
-		typeof app.command === 'function' &&
-		typeof app.option === 'function' &&
-		typeof app.action === 'function'
-	) {
-		addList(app.command('sessions list'));
-		addShow(app.command('sessions show <nameOrId>'));
-		addExport(app.command('sessions export <nameOrId>'));
-		return;
+/** Find existing `sessions` parent or create it once. */
+function getOrCreateSessionsParent(program: Command): Command {
+	const existing = program.commands?.find((c) => c.name() === 'sessions');
+	if (existing) {
+		return existing;
 	}
-
-	// commander-style
-	addList(app.command('sessions list'));
-	addShow(app.command('sessions show <nameOrId>'));
-	addExport(app.command('sessions export <nameOrId>'));
+	return program.command('sessions').description('Session utilities');
 }

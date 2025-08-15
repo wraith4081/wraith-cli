@@ -115,7 +115,8 @@ describe('sessions history', () => {
 			},
 		};
 
-		registerSessionsHistorySubcommand(program as unknown);
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		registerSessionsHistorySubcommand(program as any);
 
 		// execute the action we queued
 		await calls[0]();
@@ -173,7 +174,8 @@ describe('sessions history', () => {
 			},
 		};
 
-		registerSessionsHistorySubcommand(program as unknown);
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		registerSessionsHistorySubcommand(program as any);
 		await actions[0]();
 
 		const printed = out.mock.calls.map((c) => String(c[0])).join('');

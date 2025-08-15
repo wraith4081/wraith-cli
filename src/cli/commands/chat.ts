@@ -1,6 +1,9 @@
+/** biome-ignore-all lint/suspicious/noConsole: tbd */
+
 import { createInterface } from 'node:readline';
 import { startChatSession } from '@core/orchestrator';
 import { type RenderMode, renderText } from '@render/index';
+import type { Command } from 'commander';
 
 export interface ChatCliOptions {
 	modelFlag?: string;
@@ -110,50 +113,8 @@ export async function handleChatCommand(opts: ChatCliOptions): Promise<number> {
 	return 0;
 }
 
-export function registerChatCommand(program: unknown): void {
-	// biome-ignore lint/suspicious/noExplicitAny: CLI frameworks are duck-typed
-	const app: any = program;
-
-	// sade-style
-	if (
-		typeof app.command === 'function' &&
-		typeof app.option === 'function' &&
-		typeof app.action === 'function'
-	) {
-		app.command('chat')
-			.describe(
-				'Interactive chat session (Ctrl+C aborts the current stream)'
-			)
-			.option('-m, --model <id>', 'Override model id')
-			.option('-p, --profile <name>', 'Use profile defaults')
-			.option(
-				'--render <mode>',
-				'Rendering: plain|markdown|ansi',
-				'markdown'
-			)
-			.option(
-				'--system <text>',
-				'Append a system section for the whole chat session'
-			)
-			.option(
-				'--instructions <text>',
-				'Add a persistent instruction message'
-			)
-			.action(async (flags: Record<string, unknown>) => {
-				const code = await handleChatCommand({
-					modelFlag: toOpt(flags.model),
-					profileFlag: toOpt(flags.profile),
-					render: toRender(flags.render),
-					systemOverride: toOpt(flags.system),
-					instructions: toOpt(flags.instructions),
-				});
-				process.exitCode = code;
-			});
-		return;
-	}
-
-	// commander-style
-	const cmd = app
+export function registerChatCommand(program: Command): void {
+	const cmd = program
 		.command('chat')
 		.description(
 			'Interactive chat session (Ctrl+C aborts the current stream)'
