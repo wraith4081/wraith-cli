@@ -1,9 +1,12 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { childLogger } from '@obs/logger';
 import { ToolExecutionError, ToolPermissionError } from '@tools/errors';
 import type { ToolRegistry } from '@tools/registry';
 import type { ToolHandler, ToolSpec } from '@tools/types';
+
+const log = childLogger({ mod: 'tools.shell' });
 
 type Json = Record<string, unknown>;
 
@@ -11,6 +14,12 @@ function ensureInside(base: string, dir: string): string {
 	const abs = path.resolve(base, dir);
 	const rel = path.relative(base, abs);
 	if (rel.startsWith('..') || path.isAbsolute(rel)) {
+		log.warn({
+			msg: 'shell.cwd-escape',
+			base,
+			dir,
+			resolved: abs,
+		});
 		throw new ToolPermissionError(
 			'shell.exec',
 			`cwd escapes sandbox: ${dir}`
@@ -160,8 +169,18 @@ const execHandler: ToolHandler = async (params, ctx) => {
 	const tokenBase = JSON.stringify({ cwd: cwdUsed, tokens });
 	const confirmToken = sha8(tokenBase);
 
-	// If preview requested or destructive without matching confirmation, do not run
+	// Preview or missing confirmation
 	if (p.preview === true || (destructive && p.confirm !== confirmToken)) {
+		log.info({
+			msg: 'shell.exec.preview',
+			cwd: cwdUsed,
+			command: p.command,
+			argsCount: p.shell ? undefined : (p.args ?? []).length,
+			shell: p.shell ?? false,
+			destructive,
+			reasons,
+			requiresConfirmation: destructive,
+		});
 		return {
 			preview: true,
 			requiresConfirmation: destructive,
@@ -186,6 +205,16 @@ const execHandler: ToolHandler = async (params, ctx) => {
 		env: { ...process.env, ...(p.env ?? {}) },
 		shell: shellFlag,
 	} as const;
+
+	log.info({
+		msg: 'shell.exec.start',
+		cwd: cwdUsed,
+		command: p.command,
+		argsCount: shellFlag ? undefined : args.length,
+		shell: shellFlag,
+		timeoutMs,
+		maxOutputBytes: maxOutput,
+	});
 
 	const child: ChildProcess = spawn(p.command, args, options);
 
@@ -239,6 +268,12 @@ const execHandler: ToolHandler = async (params, ctx) => {
 		timedOut = true;
 		try {
 			child.kill('SIGKILL');
+			log.warn({
+				msg: 'shell.exec.timeout-kill',
+				cwd: cwdUsed,
+				command: p.command,
+				timeoutMs,
+			});
 		} catch {
 			/* ignore */
 		}
@@ -248,7 +283,10 @@ const execHandler: ToolHandler = async (params, ctx) => {
 		code: number | null;
 		signal: NodeJS.Signals | null;
 	}>((resolve) => {
-		child.on('error', () => resolve({ code: null, signal: null }));
+		child.on('error', (err) => {
+			log.error({ msg: 'shell.exec.spawn-error', error: err?.message });
+			resolve({ code: null, signal: null });
+		});
 		child.on('close', (code, signal) => resolve({ code, signal }));
 	});
 
@@ -275,6 +313,20 @@ const execHandler: ToolHandler = async (params, ctx) => {
 		shell: shellFlag,
 	} as Json;
 
+	log.info({
+		msg: 'shell.exec.done',
+		cwd: cwdUsed,
+		command: p.command,
+		exitCode: result.exitCode,
+		ok: result.ok,
+		timedOut,
+		truncatedStdout: outTrunc,
+		truncatedStderr: errTrunc,
+		stdoutBytes: Buffer.byteLength(stdout, 'utf8'),
+		stderrBytes: Buffer.byteLength(stderr, 'utf8'),
+		ms: durationMs,
+	});
+
 	// Non-interactive: propagate non-zero as ToolExecutionError
 	if (
 		!p.interactive &&
@@ -285,6 +337,12 @@ const execHandler: ToolHandler = async (params, ctx) => {
 		const msg = timedOut
 			? `timeout after ${timeoutMs}ms`
 			: `exit ${result.exitCode}${stderr ? ` — ${stderr.split('\n', 1)[0]}` : ''}`;
+		log.error({
+			msg: 'shell.exec.error',
+			cwd: cwdUsed,
+			command: p.command,
+			error: msg,
+		});
 		throw new ToolExecutionError('shell.exec', new Error(msg));
 	}
 

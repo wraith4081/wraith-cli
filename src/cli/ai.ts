@@ -1,6 +1,7 @@
 /** biome-ignore-all lint/suspicious/noConsole: tbd */
 
 import { getLogger, type LogLevel, setLogLevel } from '@obs/logger';
+import { enableTrace } from '@obs/trace';
 import { loadConfig } from '@store/config';
 import { formatBuildInfo, VERSION } from '@util/build-info';
 import { Command } from 'commander';
@@ -43,11 +44,20 @@ program.option('-p, --profile <name>', 'active profile name');
 program.option('-m, --model <name>', 'model id or alias');
 
 program.hook('preAction', (thisCmd) => {
-	const opts = thisCmd.opts<{ logLevel?: string }>();
+	const opts = thisCmd.opts<{
+		logLevel?: string;
+		trace?: string | boolean;
+	}>();
 	const level = (opts.logLevel ||
 		process.env.LOG_LEVEL ||
 		'info') as LogLevel;
 	setLogLevel(level);
+
+	setLogLevel(level);
+	if (opts.trace) {
+		const file = typeof opts.trace === 'string' ? opts.trace : undefined;
+		enableTrace({ filePath: file });
+	}
 });
 
 program

@@ -3,17 +3,38 @@ import {
 	fetchAndNormalizeUrl,
 	type UrlAttachment,
 } from '@ingest/url';
+import { childLogger } from '@obs/logger';
 import { ToolPermissionError } from '@tools/errors';
 import type { ToolRegistry } from '@tools/registry';
 import type { ToolHandler, ToolSpec } from '@tools/types';
 
+const log = childLogger({ mod: 'tools.web' });
+
 function assertHttp(url: string): void {
 	// Only allow http(s) — keep it simple & predictable
 	if (!/^https?:\/\//i.test(url)) {
+		log.warn({ msg: 'web.fetch.invalid-protocol', url });
 		throw new ToolPermissionError(
 			'web.fetch',
 			`Only http(s) URLs are allowed: ${url}`
 		);
+	}
+}
+
+function sanitizeUrl(u: string): string {
+	try {
+		const parsed = new URL(u);
+		const sensitive =
+			/^(token|key|secret|sig|signature|auth|authorization|apikey|access[_-]?token)$/i;
+		for (const [k] of parsed.searchParams) {
+			if (sensitive.test(k)) {
+				parsed.searchParams.set(k, '***');
+			}
+		}
+		return parsed.toString();
+	} catch {
+		// if it doesn't parse, return as-is (still just a string)
+		return u;
 	}
 }
 
@@ -47,6 +68,7 @@ export const WebFetchSpec: ToolSpec = {
 };
 
 const fetchHandler: ToolHandler = async (params, _ctx) => {
+	const t0 = Date.now();
 	const p = params as {
 		url: string;
 		timeoutMs?: number;
@@ -65,7 +87,28 @@ const fetchHandler: ToolHandler = async (params, _ctx) => {
 		userAgent: p.userAgent,
 	};
 
+	log.info({
+		msg: 'web.fetch.start',
+		url: sanitizeUrl(p.url),
+		timeoutMs: opts.timeoutMs,
+		maxBytes: opts.maxBytes,
+		accept: opts.acceptedTypes,
+		hasUserAgent: Boolean(opts.userAgent),
+	});
+
 	const res: UrlAttachment = await fetchAndNormalizeUrl(p.url, opts);
+
+	log.info({
+		msg: 'web.fetch.done',
+		url: sanitizeUrl(res.url ?? p.url),
+		ok: res.ok,
+		status: res.status,
+		bytes: res.bytes,
+		truncated: res.truncated ?? false,
+		contentType: res.contentType,
+		tokenEstimate: res.tokenEstimate,
+		ms: Date.now() - t0,
+	});
 
 	// Shape the output to a stable tool result surface
 	return {

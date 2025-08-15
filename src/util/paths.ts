@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +10,18 @@ export function getProjectWraithDir(cwd = projectRoot) {
 
 export function getUserWraithDir() {
 	return path.join(os.homedir(), '.wraith');
+}
+
+export function wraithDir(): string {
+	return path.join(process.cwd(), '.wraith');
+}
+
+export function traceDir(): string {
+	const dir = path.join(wraithDir(), 'traces');
+	if (!fs.existsSync(dir)) {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+	return dir;
 }
 
 export const projectWraithDir = getProjectWraithDir();

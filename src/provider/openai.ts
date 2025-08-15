@@ -1,4 +1,5 @@
 import { getLogger } from '@obs/logger';
+import { emit } from '@obs/trace';
 import OpenAI from 'openai';
 import type { Stream } from 'openai/core/streaming.mjs';
 import {
@@ -129,6 +130,8 @@ export class OpenAIProvider implements IProvider {
 		signal?: AbortSignal
 	): Promise<ChatResult> {
 		const log = getLogger();
+
+		const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		try {
 			const messages = req.messages.map((m) => ({
 				role: m.role,
@@ -158,6 +161,13 @@ export class OpenAIProvider implements IProvider {
 				}
 			}
 
+			emit({
+				t: 'provider.request',
+				ts: Date.now(),
+				id: reqId,
+				model: req.model,
+			});
+
 			const stream = (await this.client.chat.completions.create(
 				// biome-ignore lint/suspicious/noExplicitAny: SDK accepts additional fields at runtime
 				createArgs as any,
@@ -183,6 +193,14 @@ export class OpenAIProvider implements IProvider {
 				}
 			}
 
+			emit({
+				t: 'provider.response',
+				ts: Date.now(),
+				id: reqId,
+				model: req.model,
+				finishReason,
+			});
+
 			return {
 				model: req.model,
 				content,
@@ -190,6 +208,15 @@ export class OpenAIProvider implements IProvider {
 			};
 		} catch (err) {
 			const mapped = mapOpenAIError(err);
+
+			emit({
+				t: 'provider.error',
+				ts: Date.now(),
+				id: reqId,
+				code: mapped.code,
+				status: mapped.status,
+				message: mapped.message,
+			});
 			log.error({
 				msg: 'openai-streamChat-error',
 				code: mapped.code,

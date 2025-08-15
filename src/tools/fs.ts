@@ -1,10 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { childLogger } from '@obs/logger';
 import { ToolPermissionError } from '@tools/errors';
 import type { ToolRegistry } from '@tools/registry';
 import type { ToolHandler, ToolSpec } from '@tools/types';
 import { applyPatch, createTwoFilesPatch } from 'diff';
+
+const log = childLogger({ mod: 'tools.fs' });
 
 type Json = Record<string, unknown>;
 
@@ -46,6 +49,12 @@ function resolveInSandbox(cwd: string, rel: string): string {
 	const relFromRoot = path.relative(cwd, abs);
 	// outside root -> '../' prefix or absolute
 	if (relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) {
+		log.warn({
+			msg: 'fs.path-escape-detected',
+			cwd,
+			requested: rel,
+			resolved: abs,
+		});
 		throw new ToolPermissionError('fs', `Path escapes sandbox: ${rel}`);
 	}
 	return abs;
@@ -60,12 +69,23 @@ function guardSymlinkWrites(absPath: string, op: string): void {
 			const base = fs.realpathSync(path.dirname(absPath));
 			const rel = path.relative(base, real);
 			if (rel.startsWith('..') || path.isAbsolute(rel)) {
+				log.warn({
+					msg: 'fs.symlink-outside-sandbox',
+					op,
+					target: toPosix(absPath),
+					real: toPosix(real),
+				});
 				throw new ToolPermissionError(
 					`fs.${op}`,
 					`Refusing to follow symlink outside sandbox: ${toPosix(absPath)} -> ${toPosix(real)}`
 				);
 			}
 			// more conservative: disallow writing via symlink entirely
+			log.warn({
+				msg: 'fs.symlink-write-denied',
+				op,
+				target: toPosix(absPath),
+			});
 			throw new ToolPermissionError(
 				`fs.${op}`,
 				`Refusing to write via symlink: ${toPosix(absPath)}`
@@ -76,6 +96,12 @@ function guardSymlinkWrites(absPath: string, op: string): void {
 		const parent = fs.realpathSync(path.dirname(absPath));
 		const rel = path.relative(parent, absPath);
 		if (rel.startsWith('..') || path.isAbsolute(rel)) {
+			log.warn({
+				msg: 'fs.parent-escape-detected',
+				op,
+				parent: toPosix(parent),
+				target: toPosix(absPath),
+			});
 			throw new ToolPermissionError(
 				`fs.${op}`,
 				`Parent directory escapes sandbox: ${toPosix(absPath)}`
@@ -236,6 +262,7 @@ const FsPatchSpec: ToolSpec = {
 };
 
 const listHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
 	const p = params as {
 		path: string;
 		recursive?: boolean;
@@ -248,6 +275,15 @@ const listHandler: ToolHandler = (params, ctx) => {
 	const includeFiles = p.includeFiles ?? true;
 	const includeDirs = p.includeDirs ?? true;
 	const maxEntries = Math.max(1, p.maxEntries ?? 10_000);
+
+	log.debug({
+		msg: 'fs.list.start',
+		base: toPosix(path.relative(ctx.cwd, base)),
+		recursive,
+		includeFiles,
+		includeDirs,
+		maxEntries,
+	});
 
 	const out: Array<{
 		path: string;
@@ -305,35 +341,59 @@ const listHandler: ToolHandler = (params, ctx) => {
 			mtimeMs: st.mtimeMs,
 		});
 	}
-	return {
+	const res = {
 		entries: out.slice(0, maxEntries),
 		truncated: out.length > maxEntries,
 	};
+	log.debug({
+		msg: 'fs.list.done',
+		count: res.entries.length,
+		truncated: res.truncated,
+		ms: Date.now() - t0,
+	});
+	return res;
 };
 
 const readHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
 	const p = params as { path: string; maxBytes?: number };
 	const abs = resolveInSandbox(ctx.cwd, p.path);
 	const maxBytes = Math.max(1, p.maxBytes ?? 1_048_576);
+
+	log.debug({
+		msg: 'fs.read.start',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		maxBytes,
+	});
+
 	const r = readTextFile(abs, maxBytes);
 	const meta = {
 		path: toPosix(path.relative(ctx.cwd, abs)),
 		bytes: r.bytes,
 		truncated: r.truncated,
 	};
-	if (r.binary) {
-		return {
-			...meta,
-			binary: true,
-			sha256: r.buf ? sha256(r.buf) : undefined,
-		} as Json;
-	}
-	return {
-		...meta,
-		binary: false,
-		content: r.content ?? '',
-		sha256: r.buf ? sha256(r.buf) : undefined,
-	} as Json;
+	const out = r.binary
+		? ({
+				...meta,
+				binary: true,
+				sha256: r.buf ? sha256(r.buf) : undefined,
+			} as Json)
+		: ({
+				...meta,
+				binary: false,
+				content: r.content ?? '',
+				sha256: r.buf ? sha256(r.buf) : undefined,
+			} as Json);
+
+	log.debug({
+		msg: 'fs.read.done',
+		path: meta.path,
+		binary: r.binary,
+		bytes: r.bytes,
+		truncated: r.truncated,
+		ms: Date.now() - t0,
+	});
+	return out;
 };
 
 function prepareWrite(
@@ -362,6 +422,7 @@ function prepareWrite(
 }
 
 const writeHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
 	const p = params as {
 		path: string;
 		content: string;
@@ -380,12 +441,20 @@ const writeHandler: ToolHandler = (params, ctx) => {
 
 	const exists = fs.existsSync(abs);
 	if (exists && !overwrite) {
+		log.warn({
+			msg: 'fs.write.overwrite-denied',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
 		throw new ToolPermissionError(
 			'fs.write',
 			`Refusing to overwrite existing file: ${toPosix(p.path)}`
 		);
 	}
 	if (!(exists || create)) {
+		log.warn({
+			msg: 'fs.write.create-denied',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
 		throw new ToolPermissionError(
 			'fs.write',
 			`Refusing to create new file: ${toPosix(p.path)}`
@@ -398,13 +467,27 @@ const writeHandler: ToolHandler = (params, ctx) => {
 		maxBytes
 	);
 	if (oldExists && oldBinary) {
+		log.warn({
+			msg: 'fs.write.binary-refused',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
 		throw new ToolPermissionError(
 			'fs.write',
 			`Target is binary; refusing to edit: ${toPosix(p.path)}`
 		);
 	}
 
+	const diffBytes = Buffer.byteLength(diff, 'utf8');
+	const diffLines = diff.split('\n').length;
+
 	if (preview) {
+		log.debug({
+			msg: 'fs.write.preview',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diffBytes,
+			diffLines,
+			ms: Date.now() - t0,
+		});
 		return {
 			preview: true,
 			path: toPosix(path.relative(ctx.cwd, abs)),
@@ -414,6 +497,14 @@ const writeHandler: ToolHandler = (params, ctx) => {
 
 	ensureDir(path.dirname(abs));
 	fs.writeFileSync(abs, p.content, 'utf8');
+	log.info({
+		msg: 'fs.write.ok',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		bytes: Buffer.byteLength(p.content, 'utf8'),
+		diffBytes,
+		diffLines,
+		ms: Date.now() - t0,
+	});
 	return {
 		written: true,
 		bytes: Buffer.byteLength(p.content, 'utf8'),
@@ -423,6 +514,7 @@ const writeHandler: ToolHandler = (params, ctx) => {
 };
 
 const appendHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
 	const p = params as {
 		path: string;
 		content: string;
@@ -439,6 +531,10 @@ const appendHandler: ToolHandler = (params, ctx) => {
 
 	const exists = fs.existsSync(abs);
 	if (!(exists || create)) {
+		log.warn({
+			msg: 'fs.append.create-denied',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
 		throw new ToolPermissionError(
 			'fs.append',
 			`Refusing to create new file: ${toPosix(p.path)}`
@@ -447,6 +543,10 @@ const appendHandler: ToolHandler = (params, ctx) => {
 
 	const r = readTextFile(abs, maxBytes);
 	if (exists && r.binary) {
+		log.warn({
+			msg: 'fs.append.binary-refused',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
 		throw new ToolPermissionError(
 			'fs.append',
 			`Target is binary; refusing to edit: ${toPosix(p.path)}`
@@ -463,7 +563,17 @@ const appendHandler: ToolHandler = (params, ctx) => {
 		'after'
 	);
 
+	const diffBytes = Buffer.byteLength(diff, 'utf8');
+	const diffLines = diff.split('\n').length;
+
 	if (preview) {
+		log.debug({
+			msg: 'fs.append.preview',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diffBytes,
+			diffLines,
+			ms: Date.now() - t0,
+		});
 		return {
 			preview: true,
 			path: toPosix(path.relative(ctx.cwd, abs)),
@@ -473,6 +583,14 @@ const appendHandler: ToolHandler = (params, ctx) => {
 
 	ensureDir(path.dirname(abs));
 	fs.writeFileSync(abs, newText, 'utf8');
+	log.info({
+		msg: 'fs.append.ok',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		appendedBytes: Buffer.byteLength(p.content, 'utf8'),
+		diffBytes,
+		diffLines,
+		ms: Date.now() - t0,
+	});
 	return {
 		appended: true,
 		bytes: Buffer.byteLength(p.content, 'utf8'),
@@ -482,6 +600,7 @@ const appendHandler: ToolHandler = (params, ctx) => {
 };
 
 const searchHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
 	const p = params as {
 		root?: string;
 		paths?: string[];
@@ -495,6 +614,17 @@ const searchHandler: ToolHandler = (params, ctx) => {
 	const searchPaths = (p.paths ?? []).length ? p.paths : ['.'];
 	const maxMatches = Math.max(1, p.maxMatches ?? 500);
 	const maxFileBytes = Math.max(1, p.maxFileBytes ?? 1_048_576);
+
+	log.debug({
+		msg: 'fs.search.start',
+		root: toPosix(path.relative(ctx.cwd, rootAbs)),
+		paths: searchPaths,
+		regex: p.regex ?? false,
+		caseSensitive: p.caseSensitive ?? false,
+		maxMatches,
+		maxFileBytes,
+		queryLen: p.query?.length ?? 0,
+	});
 
 	const results: Array<{
 		file: string;
@@ -591,10 +721,18 @@ const searchHandler: ToolHandler = (params, ctx) => {
 		}
 	}
 
-	return { matches: results, truncated: results.length >= maxMatches };
+	const res = { matches: results, truncated: results.length >= maxMatches };
+	log.debug({
+		msg: 'fs.search.done',
+		matches: res.matches.length,
+		truncated: res.truncated,
+		ms: Date.now() - t0,
+	});
+	return res;
 };
 
 const patchHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
 	const p = params as {
 		path: string;
 		patch: string;
@@ -607,6 +745,10 @@ const patchHandler: ToolHandler = (params, ctx) => {
 	const maxBytes = Math.max(1, p.maxBytes ?? 5_242_880);
 	const r = readTextFile(abs, maxBytes);
 	if (r.binary) {
+		log.warn({
+			msg: 'fs.patch.binary-refused',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
 		throw new ToolPermissionError(
 			'fs.patch',
 			`Target is binary; refusing to edit: ${toPosix(p.path)}`
@@ -622,6 +764,11 @@ const patchHandler: ToolHandler = (params, ctx) => {
 	}
 
 	if (applied === false) {
+		log.warn({
+			msg: 'fs.patch.apply-failed',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			preview: p.preview === true,
+		});
 		if (p.preview === true) {
 			return {
 				preview: true,
@@ -645,6 +792,13 @@ const patchHandler: ToolHandler = (params, ctx) => {
 			'before',
 			'after'
 		);
+		log.debug({
+			msg: 'fs.patch.preview',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diffBytes: Buffer.byteLength(diff, 'utf8'),
+			diffLines: diff.split('\n').length,
+			ms: Date.now() - t0,
+		});
 		return {
 			preview: true,
 			path: toPosix(path.relative(ctx.cwd, abs)),
@@ -654,6 +808,11 @@ const patchHandler: ToolHandler = (params, ctx) => {
 
 	ensureDir(path.dirname(abs));
 	fs.writeFileSync(abs, applied, 'utf8');
+	log.info({
+		msg: 'fs.patch.applied',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		ms: Date.now() - t0,
+	});
 	return {
 		applied: true,
 		path: toPosix(path.relative(ctx.cwd, abs)),

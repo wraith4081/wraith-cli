@@ -1,5 +1,6 @@
 import { resolveEffectiveOptions } from '@core/effective';
 import { resolveEffectiveModel } from '@models/selection';
+import { emit } from '@obs/trace';
 import { OpenAIProvider } from '@provider/openai';
 import type { ChatMessage, ChatUsage, IProvider } from '@provider/types';
 import { loadUserAndProjectRules } from '@rules/loader';
@@ -143,6 +144,14 @@ export function startChatSession(
 			const bounded = boundedRes.messages;
 			const notices = boundedRes.notices;
 
+			const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			emit({
+				t: 'chat.turn.start',
+				ts: startedAt,
+				id: turnId,
+				model: selection.modelId,
+			});
+
 			try {
 				const res = await provider.streamChat(
 					{ model: selection.modelId, messages: bounded },
@@ -153,6 +162,12 @@ export function startChatSession(
 						) {
 							acc += d.content;
 							onDelta?.(d.content);
+							emit({
+								t: 'chat.turn.delta',
+								ts: Date.now(),
+								id: turnId,
+								bytes: Buffer.byteLength(d.content),
+							});
 						}
 					},
 					signal
@@ -162,7 +177,13 @@ export function startChatSession(
 				const content = acc.length > 0 ? acc : (res.content ?? '');
 
 				history.push({ role: 'assistant', content });
-
+				emit({
+					t: 'chat.turn.end',
+					ts: Date.now(),
+					id: turnId,
+					elapsedMs,
+					aborted: false,
+				});
 				return {
 					content,
 					model: selection.modelId,
@@ -177,6 +198,13 @@ export function startChatSession(
 				if (content.length > 0) {
 					history.push({ role: 'assistant', content });
 				}
+				emit({
+					t: 'chat.turn.end',
+					ts: Date.now(),
+					id: turnId,
+					elapsedMs,
+					aborted: true,
+				});
 				return {
 					content,
 					model: selection.modelId,
@@ -197,6 +225,7 @@ export async function runAsk(
 	deps: AskDeps = {}
 ): Promise<AskResult> {
 	const startedAt = Date.now();
+	const id = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
 
 	const mergedConfig = deps.config ?? loadConfig().merged;
 
@@ -211,6 +240,8 @@ export async function runAsk(
 		explicitModel: eff.model,
 		explicitProfile: eff.profile,
 	});
+
+	emit({ t: 'ask.start', ts: startedAt, id, model: selection.modelId });
 
 	const provider: IProvider = deps.provider ?? new OpenAIProvider();
 
@@ -251,12 +282,33 @@ export async function runAsk(
 			if (typeof d.content === 'string' && d.content.length > 0) {
 				accumulated += d.content;
 				deps.onDelta?.(d.content);
+				emit({
+					t: 'ask.delta',
+					ts: Date.now(),
+					id,
+					bytes: Buffer.byteLength(d.content),
+				});
 			}
 		},
 		deps.signal
 	);
 
 	const elapsedMs = Date.now() - startedAt;
+
+	emit({
+		t: 'ask.end',
+		ts: Date.now(),
+		id,
+		elapsedMs,
+		tokens: result.usage
+			? {
+					input: result.usage.promptTokens,
+					output: result.usage.completionTokens,
+					total: result.usage.totalTokens,
+				}
+			: undefined,
+	});
+
 	return {
 		answer: accumulated.length > 0 ? accumulated : result.content,
 		model: selection.modelId,
