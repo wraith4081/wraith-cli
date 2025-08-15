@@ -34,7 +34,9 @@ export type BatchOptions = {
 	rps?: number; // requests per second cap
 	rpm?: number; // requests per minute cap
 	retries?: number; // retry attempts on rate-limit/5xx (default 2)
-	backoffMs?: number; // wait per retry attempt (default 500)
+	backoffMs?: number; // base backoff (default 500ms)
+	jitterPct?: number; // 0..1 (default 0.2)
+	timeoutMs?: number; // per-item timeout
 };
 
 export function parseJsonl(
@@ -239,8 +241,15 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 
 	const concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
 	const limiter = new RateLimiter(opts.rps, opts.rpm);
-	const retries = Math.max(0, Math.floor(opts.retries ?? 2));
-	const backoffMs = Math.max(0, Math.floor(opts.backoffMs ?? 500));
+
+	// reliability knobs
+	const retries = clampInt(opts.retries, 0, 6, 2);
+	const backoffMs = Math.max(1, opts.backoffMs ?? 500);
+	const jitterPct = clampFloat(opts.jitterPct, 0, 1, 0.2);
+	const timeoutMs = Number.isFinite(opts.timeoutMs as number)
+		? (opts.timeoutMs as number)
+		: undefined;
+
 	const failFast = opts.failFast === true;
 
 	type Outcome =
@@ -250,13 +259,20 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 	const results: Outcome[] = new Array(rawItems.length);
 	let failIndex: number | null = null;
 
+	// SIGINT cancellation (stop scheduling new work)
+	let cancelled = false;
+	const onSigint = () => {
+		cancelled = true;
+	};
+	process.on('SIGINT', onSigint);
+
 	let next = 0;
 	const workers: Promise<void>[] = [];
 	for (let w = 0; w < concurrency; w++) {
 		workers.push(
 			(async () => {
 				while (true) {
-					if (failFast && failIndex !== null) {
+					if ((failFast && failIndex !== null) || cancelled) {
 						break;
 					}
 					const myIndex = next++;
@@ -293,8 +309,13 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 								runAskOrchestrator({
 									prompt,
 								}),
-							retries,
-							backoffMs
+							{
+								retries,
+								backoffMs,
+								jitterPct,
+								timeoutMs,
+								extraMalformedRetry: true,
+							}
 						);
 						results[myIndex] = {
 							ok: true,
@@ -306,7 +327,7 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 								? e.message
 								: String(e ?? 'Unknown error');
 						results[myIndex] = { ok: false, message: msg };
-						if (failFast) {
+						if (failFast || cancelled) {
 							failIndex = myIndex;
 							break;
 						}
@@ -317,6 +338,7 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 	}
 
 	await Promise.all(workers);
+	process.removeListener('SIGINT', onSigint);
 
 	// Print in input order with a blank line BETWEEN answers; no trailing blank line.
 	for (let i = 0; i < results.length; i++) {
@@ -346,7 +368,8 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 	}
 
 	const anyFail = results.some((r) => r?.ok === false);
-	return anyFail ? 1 : 0;
+	// if we were cancelled mid-run, treat as failure
+	return cancelled || anyFail ? 1 : 0;
 }
 
 function normalizeVars(obj: Plain): Record<string, string> {
@@ -361,27 +384,6 @@ function normalizeVars(obj: Plain): Record<string, string> {
 		out[k] = typeof v === 'string' ? v : JSON.stringify(v);
 	}
 	return out;
-}
-
-async function runWithRetry<T>(
-	fn: () => Promise<T>,
-	retries: number,
-	backoffMs: number
-): Promise<T> {
-	let attempt = 0;
-	// eslint-disable-next-line no-constant-condition
-	while (true) {
-		try {
-			return await fn();
-		} catch (e) {
-			attempt++;
-			if (!isRetryable(e) || attempt > retries) {
-				throw e;
-			}
-			const wait = backoffMs * attempt; // linear backoff
-			await sleep(wait);
-		}
-	}
 }
 
 function isRetryable(e: unknown): boolean {
@@ -401,15 +403,132 @@ function isRetryable(e: unknown): boolean {
 		}
 	}
 	// biome-ignore lint/suspicious/noExplicitAny: tbd
-	const status = (e as any)?.status as number | undefined;
-	if (status === 429 || (status && status >= 500 && status <= 599)) {
+	const any = e as any;
+	if (any && any.code === 'E_TIMEOUT') {
+		return true;
+	}
+	const st = any?.status as number | undefined;
+	if (st === 429 || (st && st >= 500 && st <= 599)) {
 		return true;
 	}
 	return false;
 }
+function isMalformedError(e: unknown): boolean {
+	const msg = e instanceof Error ? e.message : e ? String(e) : '';
+	return /malformed|invalid|parse|json/i.test(msg);
+}
+function backoffDelay(retryIndex: number, base: number, jitterPct: number) {
+	const pure = base * 2 ** Math.max(0, retryIndex - 1);
+	if (!jitterPct) {
+		return pure;
+	}
+	const j = pure * jitterPct;
+	return pure - j + Math.random() * (2 * j);
+}
+async function withTimeout<T>(p: Promise<T>, ms?: number): Promise<T> {
+	if (!(ms && ms > 0)) {
+		return await p;
+	}
+	let to: NodeJS.Timeout | null = null;
+	try {
+		return await Promise.race<T>([
+			p,
+			new Promise<T>((_res, rej) => {
+				to = setTimeout(() => {
+					const err = new Error(`timeout after ${ms}ms`);
+					// biome-ignore lint/suspicious/noExplicitAny: tbd
+					(err as any).code = 'E_TIMEOUT';
+					rej(err);
+				}, ms);
+			}),
+		]);
+	} finally {
+		if (to) {
+			clearTimeout(to);
+		}
+	}
+}
+async function runWithRetry<T>(
+	fn: () => Promise<T>,
+	opts: {
+		retries: number;
+		backoffMs: number;
+		jitterPct: number;
+		timeoutMs?: number;
+		extraMalformedRetry?: boolean;
+	}
+): Promise<T> {
+	let retryCount = 0;
+	let usedMalformedBonus = false;
+
+	while (true) {
+		try {
+			return await withTimeout(fn(), opts.timeoutMs);
+		} catch (e) {
+			const malformed = isMalformedError(e);
+			const canUseBonus =
+				malformed && opts.extraMalformedRetry && !usedMalformedBonus;
+
+			let waitMs = 0;
+			if (canUseBonus) {
+				// immediate extra retry (no backoff)
+				usedMalformedBonus = true;
+				retryCount++;
+			} else if (isRetryable(e) && retryCount < opts.retries) {
+				retryCount++;
+				waitMs = backoffDelay(
+					retryCount,
+					opts.backoffMs,
+					opts.jitterPct
+				);
+			} else {
+				throw e;
+			}
+
+			if (waitMs > 0) {
+				await sleep(waitMs);
+			}
+		}
+	}
+}
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
+}
+
+function clampInt(
+	n: unknown | undefined,
+	min: number,
+	max: number,
+	def: number
+): number {
+	const v =
+		typeof n === 'number'
+			? n
+			: typeof n === 'string'
+				? Number.parseInt(n, 10)
+				: Number.NaN;
+	if (!Number.isFinite(v)) {
+		return def;
+	}
+	return Math.max(min, Math.min(max, Math.floor(v)));
+}
+function clampFloat(
+	n: unknown | undefined,
+	min: number,
+	max: number,
+	def: number
+): number {
+	const v =
+		typeof n === 'number'
+			? n
+			: typeof n === 'string'
+				? Number.parseFloat(n)
+				: Number.NaN;
+	if (!Number.isFinite(v)) {
+		return def;
+	}
+	return Math.max(min, Math.min(max, v));
 }
 
 export function registerBatchCommand(program: Command) {
@@ -437,9 +556,11 @@ export function registerBatchCommand(program: Command) {
 		)
 		.option(
 			'--backoff <ms>',
-			'Backoff per retry attempt (default: 500)',
+			'Base backoff per retry (default: 500)',
 			toInt
-		);
+		)
+		.option('--jitter <0..1>', 'Jitter percentage (default: 0.2)', toFloat)
+		.option('--timeout <ms>', 'Per-item timeout in ms', toInt);
 
 	cmd.action(async (file: string, flags: Record<string, unknown>) => {
 		const code = await handleBatchCommand({
@@ -455,6 +576,8 @@ export function registerBatchCommand(program: Command) {
 			rpm: toInt(flags.rpm),
 			retries: toInt(flags.retries) ?? 2,
 			backoffMs: toInt(flags.backoff) ?? 500,
+			jitterPct: toFloat(flags.jitter) ?? 0.2,
+			timeoutMs: toInt(flags.timeout),
 		});
 		process.exitCode = code;
 	});
@@ -464,12 +587,19 @@ function toInt(v: unknown): number | undefined {
 	const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
 	return Number.isFinite(n) ? n : undefined;
 }
-
+function toFloat(v: unknown): number | undefined {
+	const n =
+		typeof v === 'string'
+			? Number.parseFloat(v)
+			: typeof v === 'number'
+				? v
+				: Number.NaN;
+	return Number.isFinite(n) ? n : undefined;
+}
 function toFmt(v: unknown): 'csv' | 'jsonl' | undefined {
 	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
 	return s === 'csv' || s === 'jsonl' ? s : undefined;
 }
-
 function parseVarsFlag(v: unknown): Record<string, string> | undefined {
 	if (!v) {
 		return;

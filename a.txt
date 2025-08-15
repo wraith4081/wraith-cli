@@ -1,0 +1,3877 @@
+
+```text
+# src/cli/commands/batch.ts
+```
+```ts
+import fs from 'node:fs';
+import path from 'node:path';
+import { runAsk as runAskOrchestrator } from '@core/orchestrator';
+import { isProviderError } from '@provider/types';
+import {
+	loadTemplateContent,
+	renderTemplate,
+	resolveTemplateByName,
+} from '@util/templates';
+import type { Command } from 'commander';
+
+type Plain = Record<string, unknown>;
+
+export type BatchInputItem = {
+	prompt: string;
+	[k: string]: unknown;
+};
+
+export type BatchOptions = {
+	// input
+	filePath?: string; // preferred
+	file?: string; // legacy
+	input?: string; // legacy
+	format?: 'csv' | 'jsonl'; // autodetect by extension when not provided
+	sep?: string; // CSV separator (default: ,)
+
+	// templates
+	template?: string; // name of a registered template
+	vars?: Record<string, string>; // default vars to merge into each row
+
+	// execution
+	failFast?: boolean;
+	concurrency?: number; // default 1
+	rps?: number; // requests per second cap
+	rpm?: number; // requests per minute cap
+	retries?: number; // retry attempts on rate-limit/5xx (default 2)
+	backoffMs?: number; // wait per retry attempt (default 500)
+};
+
+export function parseJsonl(
+	s: string,
+	requirePrompt = true
+): (BatchInputItem | Plain)[] {
+	const items: (BatchInputItem | Plain)[] = [];
+	const lines = s.split(/\r?\n/).filter((l) => l.trim().length > 0);
+	for (const line of lines) {
+		let obj: Plain;
+		try {
+			obj = JSON.parse(line) as Plain;
+		} catch (e) {
+			throw new Error(
+				`Invalid JSON on line ${items.length + 1}: ${
+					e instanceof Error ? e.message : String(e)
+				}`
+			);
+		}
+		if (requirePrompt) {
+			const prompt = String(obj.prompt ?? '');
+			if (!prompt.trim()) {
+				throw new Error(
+					`Missing "prompt" on line ${items.length + 1} (JSONL object must have a prompt field)`
+				);
+			}
+			items.push({ ...(obj as Plain), prompt });
+		} else {
+			items.push(obj);
+		}
+	}
+	return items;
+}
+
+export function parseCsv(
+	s: string,
+	sep = ',',
+	requirePrompt = true
+): (BatchInputItem | Plain)[] {
+	const rows = s.split(/\r?\n/).map((l) => l.trimEnd());
+	if (rows.length > 0 && rows.at(-1) === '') {
+		rows.pop();
+	}
+	if (rows.length === 0) {
+		return [];
+	}
+
+	const header = safeSplitCsvRow(rows[0], sep);
+	const promptIdx = header.findIndex((h) => h.toLowerCase() === 'prompt');
+	if (requirePrompt && promptIdx < 0) {
+		throw new Error('CSV must have a "prompt" column');
+	}
+
+	const out: (BatchInputItem | Plain)[] = [];
+	for (let i = 1; i < rows.length; i++) {
+		const cols = safeSplitCsvRow(rows[i], sep);
+		const record: Plain = {};
+		for (let c = 0; c < header.length; c++) {
+			record[header[c]] = cols[c] ?? '';
+		}
+		if (requirePrompt) {
+			const prompt = String(record[header[promptIdx]] ?? '');
+			if (!prompt.trim()) {
+				throw new Error(
+					`Row ${i + 1}: missing prompt (column "${header[promptIdx]}")`
+				);
+			}
+			out.push({ ...record, prompt });
+		} else {
+			out.push(record);
+		}
+	}
+	return out;
+}
+
+function safeSplitCsvRow(line: string, sep: string): string[] {
+	const out: string[] = [];
+	let cur = '';
+	let inQuotes = false;
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i];
+		if (inQuotes) {
+			if (ch === '"') {
+				if (line[i + 1] === '"') {
+					cur += '"';
+					i++;
+				} else {
+					inQuotes = false;
+				}
+			} else {
+				cur += ch;
+			}
+		} else if (ch === '"') {
+			inQuotes = true;
+		} else if (ch === sep) {
+			out.push(cur);
+			cur = '';
+		} else {
+			cur += ch;
+		}
+	}
+	out.push(cur);
+	return out.map((s) => s.trim());
+}
+
+class RateLimiter {
+	private readonly minIntervalMs: number;
+	private nextAt = 0;
+
+	constructor(rps?: number, rpm?: number) {
+		if (rps && rps > 0) {
+			this.minIntervalMs = Math.floor(1000 / rps);
+		} else if (rpm && rpm > 0) {
+			this.minIntervalMs = Math.floor(60_000 / rpm);
+		} else {
+			this.minIntervalMs = 0;
+		}
+	}
+
+	async wait(): Promise<void> {
+		if (this.minIntervalMs <= 0) {
+			return;
+		}
+		const now = Date.now();
+		const at = Math.max(this.nextAt, now);
+		const delay = at - now;
+		this.nextAt = at + this.minIntervalMs;
+		if (delay > 0) {
+			await sleep(delay);
+		}
+	}
+}
+
+export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
+	// Accept several commonly used keys for the input file to satisfy tests.
+	const pathArg =
+		opts.filePath ??
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		(opts as any).file ??
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		(opts as any).path ??
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		(opts as any).filename ??
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		(opts as any).input ??
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		(opts as any).in;
+
+	if (!pathArg) {
+		throw new TypeError('Missing input file path');
+	}
+
+	const filePath = path.resolve(pathArg);
+	const text = fs.readFileSync(filePath, 'utf8');
+
+	const inferred = filePath.toLowerCase().endsWith('.jsonl')
+		? 'jsonl'
+		: filePath.toLowerCase().endsWith('.csv')
+			? 'csv'
+			: undefined;
+
+	const format = opts.format ?? inferred;
+	if (!format) {
+		process.stderr.write(
+			'Unsupported input format: cannot infer from extension; pass --format csv|jsonl\n'
+		);
+		return 1;
+	}
+
+	const useTemplate = Boolean(opts.template);
+	let rawItems: (BatchInputItem | Plain)[];
+
+	try {
+		if (format === 'csv') {
+			rawItems = parseCsv(text, opts.sep ?? ',', !useTemplate);
+		} else {
+			rawItems = parseJsonl(text, !useTemplate);
+		}
+	} catch (e) {
+		const msg =
+			e instanceof Error ? e.message : String(e ?? 'Unknown error');
+		process.stderr.write(`${msg}\n`);
+		return 1;
+	}
+
+	if (rawItems.length === 0) {
+		return 0;
+	}
+
+	let templateRaw: string | null = null;
+	let defaultVars: Record<string, string> = {};
+	if (useTemplate) {
+		const name = String(opts.template);
+		const meta = resolveTemplateByName(name);
+		if (!meta) {
+			process.stderr.write(`Unknown template: ${name}\n`);
+			return 1;
+		}
+		templateRaw = loadTemplateContent(meta);
+		defaultVars = opts.vars ?? {};
+	}
+
+	const concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
+	const limiter = new RateLimiter(opts.rps, opts.rpm);
+	const retries = Math.max(0, Math.floor(opts.retries ?? 2));
+	const backoffMs = Math.max(0, Math.floor(opts.backoffMs ?? 500));
+	const failFast = opts.failFast === true;
+
+	type Outcome =
+		| { ok: true; answer: string }
+		| { ok: false; message: string };
+
+	const results: Outcome[] = new Array(rawItems.length);
+	let failIndex: number | null = null;
+
+	let next = 0;
+	const workers: Promise<void>[] = [];
+	for (let w = 0; w < concurrency; w++) {
+		workers.push(
+			(async () => {
+				while (true) {
+					if (failFast && failIndex !== null) {
+						break;
+					}
+					const myIndex = next++;
+					if (myIndex >= rawItems.length) {
+						break;
+					}
+
+					const rec = rawItems[myIndex];
+					try {
+						let prompt: string;
+						if (useTemplate) {
+							// merge per-row vars with defaults; row wins
+							const vars: Record<string, string> = {
+								...defaultVars,
+								...normalizeVars(rec),
+							};
+							const { output, missing } = renderTemplate(
+								templateRaw as string,
+								vars
+							);
+							if (missing && missing.length > 0) {
+								throw new Error(
+									`Missing template vars: ${missing.join(', ')}`
+								);
+							}
+							prompt = output;
+						} else {
+							prompt = String((rec as BatchInputItem).prompt);
+						}
+
+						await limiter.wait();
+						const answer = await runWithRetry(
+							() =>
+								runAskOrchestrator({
+									prompt,
+								}),
+							retries,
+							backoffMs
+						);
+						results[myIndex] = {
+							ok: true,
+							answer: answer.answer ?? '',
+						};
+					} catch (e) {
+						const msg =
+							e instanceof Error
+								? e.message
+								: String(e ?? 'Unknown error');
+						results[myIndex] = { ok: false, message: msg };
+						if (failFast) {
+							failIndex = myIndex;
+							break;
+						}
+					}
+				}
+			})()
+		);
+	}
+
+	await Promise.all(workers);
+
+	// Print in input order with a blank line BETWEEN answers; no trailing blank line.
+	for (let i = 0; i < results.length; i++) {
+		const r = results[i];
+		if (!r) {
+			break;
+		}
+		if (r.ok) {
+			process.stdout.write(r.answer);
+			if (!r.answer.endsWith('\n')) {
+				process.stdout.write('\n');
+			}
+			if (i < results.length - 1) {
+				const hasLaterOk = results
+					.slice(i + 1)
+					.some((x) => x?.ok === true);
+				if (hasLaterOk) {
+					process.stdout.write('\n');
+				}
+			}
+		} else {
+			process.stderr.write(`Item ${i + 1} failed: ${r.message}\n`);
+			if (failFast) {
+				break;
+			}
+		}
+	}
+
+	const anyFail = results.some((r) => r?.ok === false);
+	return anyFail ? 1 : 0;
+}
+
+function normalizeVars(obj: Plain): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(obj)) {
+		if (v == null) {
+			continue;
+		}
+		if (k === 'prompt') {
+			continue;
+		}
+		out[k] = typeof v === 'string' ? v : JSON.stringify(v);
+	}
+	return out;
+}
+
+async function runWithRetry<T>(
+	fn: () => Promise<T>,
+	retries: number,
+	backoffMs: number
+): Promise<T> {
+	let attempt = 0;
+	// eslint-disable-next-line no-constant-condition
+	while (true) {
+		try {
+			return await fn();
+		} catch (e) {
+			attempt++;
+			if (!isRetryable(e) || attempt > retries) {
+				throw e;
+			}
+			const wait = backoffMs * attempt; // linear backoff
+			await sleep(wait);
+		}
+	}
+}
+
+function isRetryable(e: unknown): boolean {
+	if (isProviderError(e)) {
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const status = (e as any).status as number | undefined;
+		if (status === 429) {
+			return true;
+		}
+		if (typeof status === 'number' && status >= 500 && status <= 599) {
+			return true;
+		}
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const code = (e as any).code as string | undefined;
+		if (code && /rate[_-]?limit|overloaded/i.test(code)) {
+			return true;
+		}
+	}
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	const status = (e as any)?.status as number | undefined;
+	if (status === 429 || (status && status >= 500 && status <= 599)) {
+		return true;
+	}
+	return false;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((r) => setTimeout(r, ms));
+}
+
+export function registerBatchCommand(program: Command) {
+	const cmd = program
+		.command('batch <file>')
+		.description('Run prompts in bulk from a CSV or JSONL file')
+		.option('--format <fmt>', 'csv|jsonl (default: by file extension)')
+		.option('--sep <char>', 'CSV separator (default: ,)', ',')
+		.option(
+			'--template <name>',
+			'Template name to render each row into a prompt'
+		)
+		.option(
+			'--vars <k=v;...>',
+			'Default template vars; e.g. name=Alice;lang=en (row values override)'
+		)
+		.option('--fail-fast', 'Stop at first failure', false)
+		.option('--concurrency <n>', 'Parallel requests (default: 1)', toInt)
+		.option('--rps <n>', 'Requests per second limit', toInt)
+		.option('--rpm <n>', 'Requests per minute limit', toInt)
+		.option(
+			'--retries <n>',
+			'Retries on rate-limit/5xx (default: 2)',
+			toInt
+		)
+		.option(
+			'--backoff <ms>',
+			'Backoff per retry attempt (default: 500)',
+			toInt
+		);
+
+	cmd.action(async (file: string, flags: Record<string, unknown>) => {
+		const code = await handleBatchCommand({
+			filePath: file,
+			format: toFmt(flags.format),
+			sep: typeof flags.sep === 'string' ? flags.sep : ',',
+			template:
+				typeof flags.template === 'string' ? flags.template : undefined,
+			vars: parseVarsFlag(flags.vars),
+			failFast: flags.failFast === true,
+			concurrency: toInt(flags.concurrency),
+			rps: toInt(flags.rps),
+			rpm: toInt(flags.rpm),
+			retries: toInt(flags.retries) ?? 2,
+			backoffMs: toInt(flags.backoff) ?? 500,
+		});
+		process.exitCode = code;
+	});
+}
+
+function toInt(v: unknown): number | undefined {
+	const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
+	return Number.isFinite(n) ? n : undefined;
+}
+
+function toFmt(v: unknown): 'csv' | 'jsonl' | undefined {
+	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
+	return s === 'csv' || s === 'jsonl' ? s : undefined;
+}
+
+function parseVarsFlag(v: unknown): Record<string, string> | undefined {
+	if (!v) {
+		return;
+	}
+	const s = Array.isArray(v) ? v.join(';') : String(v);
+	const pairs = s
+		.split(/[;,]/)
+		.map((p) => p.trim())
+		.filter(Boolean);
+	const out: Record<string, string> = {};
+	for (const p of pairs) {
+		const eq = p.indexOf('=');
+		if (eq < 0) {
+			continue;
+		}
+		const k = p.slice(0, eq).trim();
+		const val = p.slice(eq + 1).trim();
+		if (!k) {
+			continue;
+		}
+		out[k] = val;
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+```
+
+```text
+# src/cli/commands/templates.ts
+```
+```ts
+/** Commander-only templates command */
+
+import {
+	listTemplates,
+	loadTemplateContent,
+	parseVarsArg,
+	renderTemplate,
+	resolveTemplateByName,
+} from '@util/templates';
+import type { Command } from 'commander';
+
+export function registerTemplatesCommand(program: Command) {
+	const root = program
+		.command('templates')
+		.description('Prompt templates commands');
+
+	// templates list
+	root.command('list')
+		.description(
+			'List available templates (project has precedence over user)'
+		)
+		.option('--json', 'Output JSON')
+		.action((opts: { json?: boolean }) => {
+			const all = listTemplates();
+
+			if (opts?.json) {
+				process.stdout.write(
+					`${JSON.stringify({ templates: all }, null, 2)}\n`
+				);
+				return;
+			}
+
+			if (all.length === 0) {
+				process.stdout.write('No templates found.\n');
+				return;
+			}
+
+			process.stdout.write('Templates:\n');
+			for (const t of all) {
+				const vars = t.variables.length
+					? ` [vars: ${t.variables.join(', ')}]`
+					: '';
+				const desc = t.description ? ` — ${t.description}` : '';
+				process.stdout.write(
+					`- ${t.name}  (${t.scope})${desc}${vars}\n`
+				);
+			}
+		});
+
+	// templates render
+	root.command('render')
+		.description('Render a template with variables')
+		.requiredOption('--template <name>', 'Template name to render')
+		.option(
+			'--vars <k=v;...>',
+			'Semicolon-separated key=value pairs',
+			(v: string, prev: string[]) => {
+				return Array.isArray(prev) ? [...prev, v] : [v];
+			},
+			[] as string[]
+		)
+		.option(
+			'--var <k=v>',
+			'Repeatable key=value pair',
+			(v: string, prev: string[]) => {
+				return Array.isArray(prev) ? [...prev, v] : [v];
+			},
+			[] as string[]
+		)
+		.option('--json', 'Output JSON envelope')
+		.action(
+			(opts: {
+				template: string;
+				vars?: string[];
+				var?: string[];
+				json?: boolean;
+			}) => {
+				const meta = resolveTemplateByName(opts.template);
+				if (!meta) {
+					const msg = `Template not found: ${opts.template}`;
+					if (opts.json) {
+						process.stdout.write(
+							`${JSON.stringify({ ok: false, error: { message: msg } }, null, 2)}\n`
+						);
+					} else {
+						process.stderr.write(`${msg}\n`);
+					}
+					process.exitCode = 1;
+					return;
+				}
+
+				const raw = loadTemplateContent(meta);
+				const vars = parseVarsArg(opts.vars ?? [], opts.var ?? []);
+				const { output, missing } = renderTemplate(raw, vars);
+
+				if (missing.length > 0) {
+					const msg = `Missing variables: ${missing.join(', ')}`;
+					if (opts.json) {
+						process.stdout.write(
+							`${JSON.stringify(
+								{
+									ok: false,
+									error: { message: msg },
+									missing,
+									template: {
+										name: meta.name,
+										scope: meta.scope,
+									},
+								},
+								null,
+								2
+							)}\n`
+						);
+					} else {
+						process.stderr.write(`${msg}\n`);
+					}
+					process.exitCode = 1;
+					return;
+				}
+
+				if (opts.json) {
+					process.stdout.write(
+						`${JSON.stringify(
+							{
+								ok: true,
+								template: {
+									name: meta.name,
+									scope: meta.scope,
+								},
+								output,
+							},
+							null,
+							2
+						)}\n`
+					);
+					return;
+				}
+
+				process.stdout.write(output);
+				if (!output.endsWith('\n')) {
+					process.stdout.write('\n');
+				}
+			}
+		);
+}
+
+```
+
+```text
+# src/cli/commands/ask.ts
+```
+```ts
+/** biome-ignore-all lint/suspicious/noConsole: tbd */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { type AskResult, runAsk } from '@core/orchestrator';
+import { runAskStructured } from '@core/structured';
+import { isProviderError } from '@provider/types';
+import { type RenderMode, renderText } from '@render/index';
+import type { Command } from 'commander';
+
+export interface AskCliOptions {
+	prompt: string; // "-" to read from stdin
+	modelFlag?: string;
+	profileFlag?: string;
+
+	// output/formatting
+	json?: boolean; // envelope {answer, model, usage, timing} (non-structured)
+	stream?: boolean; // default true (ignored when render !== 'markdown')
+	render?: RenderMode; // 'markdown' | 'plain' | 'ansi'
+
+	// structured mode
+	output?: 'text' | 'json'; // when 'json', requires --schema
+	schemaPath?: string;
+	attempts?: number; // structured attempts/repair loop
+	repair?: boolean; // shorthand: enable a few repair attempts
+
+	// one-off prompt shaping
+	systemOverride?: string; // appended to system prompt as "Command Overrides"
+	instructions?: string; // injected as a preliminary user message (before main prompt)
+
+	// prompt source
+	filePath?: string; // read prompt from a file (alternative to "-")
+
+	// misc
+	meta?: boolean; // print model/elapsed to stderr in non-JSON mode
+	save?: string; // session name to persist
+}
+
+export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
+	const startedAt = Date.now();
+
+	const prompt = await resolvePromptSource(opts);
+
+	// Structured mode takes precedence and produces ONLY the validated JSON on success
+	const structured = (opts.output ?? 'text') === 'json';
+	if (structured) {
+		if (!opts.schemaPath) {
+			return emitError(
+				'Structured mode requires --schema <file>',
+				startedAt,
+				opts.json ?? false
+			);
+		}
+		const attempts = normalizeAttempts(
+			typeof opts.attempts === 'number'
+				? opts.attempts
+				: opts.repair
+					? 3
+					: 1
+		);
+
+		try {
+			const res = await runAskStructured({
+				prompt,
+				schemaPath: path.resolve(opts.schemaPath),
+				modelFlag: opts.modelFlag,
+				profileFlag: opts.profileFlag,
+				maxAttempts: attempts,
+			});
+			if (res.ok) {
+				process.stdout.write(`${JSON.stringify(res.data)}\n`);
+				return 0;
+			}
+			const out = {
+				ok: false as const,
+				error: {
+					message: 'Schema validation failed',
+					errors: res.errors,
+				},
+				text: res.text,
+				timing: res.timing,
+			};
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 1;
+		} catch (err) {
+			const out = formatAskJsonErr(err, startedAt);
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 1;
+		}
+	}
+
+	// Non-structured path (supports streaming + render modes + optional JSON envelope)
+	const render: RenderMode = opts.render ?? 'markdown';
+	const forceNoStream = render !== 'markdown';
+	const wantStream = opts.stream !== false && !forceNoStream;
+	const wantJson = opts.json === true;
+
+	try {
+		let streamed = '';
+		const result = await runAsk(
+			{
+				prompt,
+				modelFlag: opts.modelFlag,
+				profileFlag: opts.profileFlag,
+				systemOverride: opts.systemOverride,
+				instructions: opts.instructions,
+			},
+			{
+				onDelta:
+					wantJson || !wantStream
+						? undefined
+						: (d) => {
+								streamed += d;
+								process.stdout.write(d);
+							},
+			}
+		);
+
+		// Persist single-turn session if requested
+		if (opts.save) {
+			const { saveSessionFromAsk } = await import('@sessions/store');
+			saveSessionFromAsk({
+				name: opts.save,
+				prompt,
+				answer: result.answer,
+				model: result.model,
+				profile: opts.profileFlag,
+				usage: result.usage ?? null,
+				startedAt,
+				endedAt: startedAt + (result.timing?.elapsedMs ?? 0),
+			});
+		}
+
+		if (wantJson) {
+			const out = formatAskJsonOk(result);
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 0;
+		}
+
+		if (wantStream && streamed.length > 0) {
+			if (!streamed.endsWith('\n')) {
+				process.stdout.write('\n');
+			}
+			if (opts.meta) {
+				printMeta(result);
+			}
+			return 0;
+		}
+
+		const rendered = renderText(result.answer, render);
+		process.stdout.write(rendered);
+		if (!rendered.endsWith('\n')) {
+			process.stdout.write('\n');
+		}
+		if (opts.meta) {
+			printMeta(result);
+		}
+		return 0;
+	} catch (err) {
+		if (wantJson) {
+			const out = formatAskJsonErr(err, startedAt);
+			process.stdout.write(`${JSON.stringify(out)}\n`);
+			return 1;
+		}
+		const msg = isProviderError(err)
+			? `[${err.code}${err.status ? ` ${err.status}` : ''}] ${err.message}`
+			: err instanceof Error
+				? err.message
+				: String(err);
+		process.stderr.write(`${msg}\n`);
+		return 1;
+	}
+}
+
+export function registerAskCommand(program: Command): void {
+	const cmd = program
+		.command('ask <prompt>')
+		.description('Single question; prints the model response')
+		.option('-m, --model <id>', 'Override model id')
+		.option('-p, --profile <name>', 'Use profile defaults')
+		.option('--json', 'Output a JSON envelope (non-structured mode)')
+		.option(
+			'--no-stream',
+			'Disable streaming output (markdown only streams)'
+		)
+		.option('--render <mode>', 'Rendering: plain|markdown|ansi', 'markdown')
+		.option(
+			'--output <mode>',
+			'Output mode: text|json (use with --schema)',
+			'text'
+		)
+		.option(
+			'--schema <file>',
+			'JSON/YAML schema file for structured output'
+		)
+		.option(
+			'--attempts <n>',
+			'Structured mode max attempts (repair loop)',
+			'1'
+		)
+		.option('--repair', 'Enable basic schema repair loop (≈ attempts=3)')
+		.option(
+			'--system <text>',
+			'Append a system section just for this command'
+		)
+		.option(
+			'--instructions <text>',
+			'Add a user-scoped instruction before the prompt'
+		)
+		.option(
+			'--file <path>',
+			'Read prompt from file (alternative to "-" for stdin)'
+		)
+		.option('--save <name>', 'Save this turn as a session under <name>')
+		.option('--meta', 'Print model + elapsed timing to stderr');
+
+	cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
+		const code = await handleAskCommand({
+			prompt,
+			modelFlag: toOpt(flags.model),
+			profileFlag: toOpt(flags.profile),
+			save: toOpt(flags.save),
+			json: flags.json === true,
+			stream: flags.stream !== false,
+			render: toRender(flags.render),
+			output: toOutput(flags.output),
+			schemaPath: toOpt(flags.schema),
+			attempts: toInt(flags.attempts),
+			repair: Boolean(flags.repair),
+			systemOverride: toOpt(flags.system),
+			instructions: toOpt(flags.instructions),
+			filePath: toOpt(flags.file),
+			meta: Boolean(flags.meta),
+		});
+		process.exitCode = code;
+	});
+}
+
+function toOpt(v: unknown): string | undefined {
+	return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+function toRender(v: unknown): RenderMode {
+	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
+	return s === 'plain' || s === 'ansi' ? (s as RenderMode) : 'markdown';
+}
+function toOutput(v: unknown): 'text' | 'json' {
+	const s = typeof v === 'string' ? v.toLowerCase().trim() : '';
+	return s === 'json' ? 'json' : 'text';
+}
+function toInt(v: unknown): number | undefined {
+	const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
+	return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+async function readAllFromStdin(): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const c of process.stdin) {
+		chunks.push(Buffer.from(c));
+	}
+	return Buffer.concat(chunks).toString('utf8');
+}
+function emitError(msg: string, startedAt: number, asJson: boolean): number {
+	if (asJson) {
+		const out = {
+			ok: false as const,
+			error: { message: msg },
+			timing: { startedAt, elapsedMs: 0 },
+		};
+		process.stdout.write(`${JSON.stringify(out)}\n`);
+		return 1;
+	}
+	process.stderr.write(`${msg}\n`);
+	return 1;
+}
+function normalizeAttempts(n?: number): number {
+	if (!(n && Number.isFinite(n)) || n < 1) {
+		return 1;
+	}
+	if (n > 5) {
+		return 5;
+	}
+	return Math.floor(n);
+}
+function printMeta(res: AskResult): void {
+	const ms = res.timing?.elapsedMs ?? 0;
+	const model = res.model ?? 'unknown';
+	process.stderr.write(`[meta] model=${model} elapsed=${ms}ms\n`);
+}
+
+export function formatAskJsonOk(res: AskResult) {
+	return {
+		ok: true as const,
+		answer: res.answer,
+		model: res.model,
+		usage: res.usage ?? null,
+		timing: res.timing,
+	};
+}
+
+export function formatAskJsonErr(err: unknown, startedAt: number) {
+	const elapsedMs = Date.now() - startedAt;
+	const error = isProviderError(err)
+		? { code: err.code, status: err.status, message: err.message }
+		: err instanceof Error
+			? { message: err.message }
+			: { message: String(err) };
+	return { ok: false as const, error, timing: { startedAt, elapsedMs } };
+}
+
+async function resolvePromptSource(opts: AskCliOptions): Promise<string> {
+	if (opts.prompt === '-') {
+		return await readAllFromStdin();
+	}
+	if (opts.filePath) {
+		try {
+			return fs.readFileSync(path.resolve(opts.filePath), 'utf8');
+		} catch {
+			// fall back to literal prompt if file missing
+		}
+	}
+	return String(opts.prompt ?? '');
+}
+
+```
+
+```text
+# src/util/templates.ts
+```
+```ts
+import fs from 'node:fs';
+import path from 'node:path';
+import { getProjectWraithDir, getUserWraithDir } from '@util/paths';
+import YAML from 'yaml';
+
+export type TemplateScope = 'project' | 'user';
+
+export type TemplateMeta = {
+	name: string; // logical name (filename without ext)
+	scope: TemplateScope; // where it came from
+	path: string; // absolute file path
+	description?: string; // frontmatter.description or first non-empty line
+	variables: string[]; // placeholders detected in content (e.g., {{name}} or ${name})
+};
+
+const EXTS = new Set(['.md', '.txt', '.tmpl', '.template', '.mdx']);
+
+function templatesRoot(scope: TemplateScope): string {
+	// IMPORTANT: pass process.cwd() so tests that chdir() work correctly.
+	return scope === 'project'
+		? path.join(getProjectWraithDir(process.cwd()), 'templates')
+		: path.join(getUserWraithDir(), 'templates');
+}
+
+function isTemplateFile(p: string): boolean {
+	return EXTS.has(path.extname(p).toLowerCase());
+}
+
+function readFileSafe(p: string): string | null {
+	try {
+		return fs.readFileSync(p, 'utf8');
+	} catch {
+		return null;
+	}
+}
+
+function parseFrontMatter(s: string): {
+	fm?: Record<string, unknown>;
+	body: string;
+} {
+	// Basic front-matter: ---\nYAML\n---\n<body>
+	if (!s.startsWith('---')) {
+		return { body: s };
+	}
+	// tolerate CRLF too
+	const end = s.indexOf('\n---', 3);
+	if (end < 0) {
+		return { body: s };
+	}
+	const header = s.slice(3, end + 1); // includes leading newline
+	let fm: Record<string, unknown> | undefined;
+	try {
+		fm = YAML.parse(header);
+	} catch {
+		fm = undefined;
+	}
+	// Skip closing '---' + newline after it (support CRLF or LF)
+	const after = s.slice(end + 4);
+	const body = after.replace(/^\r?\n/, '');
+	return { fm, body };
+}
+
+function extractDescription(
+	fm: Record<string, unknown> | undefined,
+	body: string
+): string | undefined {
+	if (fm && typeof fm.description === 'string' && fm.description.trim()) {
+		return fm.description.trim();
+	}
+	const first = (
+		body.split(/\r?\n/).find((l) => l.trim().length) ?? ''
+	).trim();
+	return first.replace(/^#+\s+/, '').replace(/^>\s+/, '') || undefined;
+}
+
+function detectVariables(s: string): string[] {
+	// Supports {{name}} and ${name}; names: [a-zA-Z0-9_.-]
+	const set = new Set<string>();
+	for (const re of [
+		/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g,
+		/\$\{\s*([A-Za-z0-9_.-]+)\s*\}/g,
+	]) {
+		let m: RegExpExecArray | null;
+		// biome-ignore lint/suspicious/noAssignInExpressions: tbd
+		while ((m = re.exec(s))) {
+			if (m[1]) {
+				set.add(m[1]);
+			}
+		}
+	}
+	return [...set].sort();
+}
+function listIn(scope: TemplateScope): TemplateMeta[] {
+	const roots: string[] =
+		scope === 'project'
+			? [
+					path.join(getProjectWraithDir(process.cwd()), 'templates'),
+					path.join(process.cwd(), 'templates'),
+				]
+			: [
+					path.join(getUserWraithDir(), 'templates'),
+					...(process.env.WRAITH_TEMPLATES_DIR
+						? [path.resolve(process.env.WRAITH_TEMPLATES_DIR)]
+						: []),
+				];
+
+	const seen = new Set<string>();
+	const out: TemplateMeta[] = [];
+
+	for (const root of roots) {
+		if (!(root && fs.existsSync(root))) {
+			continue;
+		}
+		const files = fs
+			.readdirSync(root)
+			.filter((f) => isTemplateFile(f))
+			.map((f) => path.join(root, f));
+
+		for (const abs of files) {
+			const name = path.basename(abs, path.extname(abs));
+			const key = `${scope}:${name}`;
+			if (seen.has(key)) {
+				continue;
+			}
+
+			const text = readFileSafe(abs);
+			if (!text) {
+				continue;
+			}
+			const { fm, body } = parseFrontMatter(text);
+			out.push({
+				name,
+				scope,
+				path: abs,
+				description: extractDescription(fm, body),
+				variables: detectVariables(body),
+			});
+			seen.add(key);
+		}
+	}
+	return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** List templates from project (higher precedence) and user. If names collide, keep project version. */
+export function listTemplates(): TemplateMeta[] {
+	const proj = listIn('project');
+	const user = listIn('user');
+	const merged = [...proj];
+	for (const t of user) {
+		if (!merged.find((x) => x.name === t.name)) {
+			merged.push(t);
+		}
+	}
+	return merged;
+}
+
+export function resolveTemplateByName(name: string): TemplateMeta | undefined {
+	const all = listTemplates();
+	return all.find((t) => t.name === name);
+}
+
+export function loadTemplateContent(meta: TemplateMeta): string {
+	const s = readFileSafe(meta.path);
+	if (!s) {
+		return '';
+	}
+	const { body } = parseFrontMatter(s);
+	return body;
+}
+
+/** Render with simple replacement ({{var}} and ${var}). Returns missing variables if any. */
+export function renderTemplate(
+	content: string,
+	vars: Record<string, string>
+): { output: string; missing: string[] } {
+	const { body } = parseFrontMatter(content);
+	const needed = detectVariables(body);
+	const missing = needed.filter((k) => {
+		const v = vars[k];
+		return v == null || String(v).trim() === '';
+	});
+
+	const replaceOne = (s: string, key: string, val: string) =>
+		s
+			.replace(
+				new RegExp(`\\{\\{\\s*${escapeReg(key)}\\s*\\}\\}`, 'g'),
+				val
+			)
+			.replace(
+				new RegExp(`\\$\\{\\s*${escapeReg(key)}\\s*\\}`, 'g'),
+				val
+			);
+
+	let out = body;
+	for (const [k, v] of Object.entries(vars)) {
+		out = replaceOne(out, k, v);
+	}
+	return { output: out, missing };
+}
+
+function escapeReg(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Parse "--vars" like "a=1;b=2" plus repeated "--var a=1". Right-most wins on key conflicts. */
+export function parseVarsArg(
+	multi: string[] = [],
+	singles: string[] = []
+): Record<string, string> {
+	const pairs: string[] = [];
+	for (const chunk of multi) {
+		for (const part of chunk.split(';')) {
+			if (part.trim()) {
+				pairs.push(part.trim());
+			}
+		}
+	}
+	for (const s of singles) {
+		if (s.trim()) {
+			pairs.push(s.trim());
+		}
+	}
+	const out: Record<string, string> = {};
+	for (const p of pairs) {
+		const eq = p.indexOf('=');
+		if (eq <= 0) {
+			continue;
+		}
+		const k = p.slice(0, eq).trim();
+		const v = p.slice(eq + 1).trim();
+		if (k) {
+			out[k] = v;
+		}
+	}
+	return out;
+}
+
+// Expose roots for tests
+export const __internal = {
+	templatesRoot,
+	isTemplateFile,
+	parseFrontMatter,
+	detectVariables,
+	extractDescription,
+};
+
+```
+
+```text
+# src/util/cli-args.ts
+```
+```ts
+export function getArgValueFrom(
+	argv: string[],
+	longName: string,
+	shortName?: string
+): string | undefined {
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (a === longName || (shortName && a === shortName)) {
+			return argv[i + 1];
+		}
+		if (a.startsWith(`${longName}=`)) {
+			return a.split('=', 2)[1];
+		}
+		if (shortName && a.startsWith(`${shortName}=`)) {
+			return a.split('=', 2)[1];
+		}
+	}
+	return;
+}
+
+export function stripStandaloneDashes(argv: string[]): string[] {
+	return argv.filter((a) => a !== '--');
+}
+
+```
+
+```text
+# src/obs/logger.ts
+```
+```ts
+import winston from 'winston';
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const SECRET_KEYS = new Set([
+	'OPENAI_API_KEY',
+	'authorization',
+	'Authorization',
+	'apiKey',
+]);
+
+function redactDeep(value: unknown): unknown {
+	if (value && typeof value === 'object') {
+		if (Array.isArray(value)) {
+			return (value as unknown[]).map(redactDeep);
+		}
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value)) {
+			if (SECRET_KEYS.has(k)) {
+				out[k] = '***';
+			} else if (
+				k.toLowerCase().includes('token') ||
+				k.toLowerCase().includes('secret')
+			) {
+				out[k] = '***';
+			} else {
+				out[k] = redactDeep(v);
+			}
+		}
+		return out;
+	}
+	return value;
+}
+
+const redactFormat = winston.format((info) => {
+	const clone = { ...info };
+	if (clone.message && typeof clone.message === 'object') {
+		clone.message = redactDeep(clone.message);
+	}
+	for (const k of Object.keys(clone)) {
+		if (k !== 'level' && k !== 'message' && k !== 'timestamp') {
+			clone[k] = redactDeep(clone[k]);
+		}
+	}
+	return clone;
+});
+
+let currentLevel: LogLevel = (process.env.LOG_LEVEL as LogLevel) || 'info';
+let baseLogger: winston.Logger | null = null;
+
+function buildLogger(level: LogLevel): winston.Logger {
+	return winston.createLogger({
+		level,
+		levels: winston.config.npm.levels, // debug/info/warn/error
+		format: winston.format.combine(
+			redactFormat(),
+			winston.format.timestamp(),
+			winston.format.json()
+		),
+		transports: [
+			new winston.transports.Console({
+				stderrLevels: ['error'],
+			}),
+		],
+	});
+}
+
+export function setLogLevel(level: LogLevel) {
+	currentLevel = level;
+	baseLogger = buildLogger(level);
+}
+
+export function getLogger(): winston.Logger {
+	if (!baseLogger) {
+		baseLogger = buildLogger(currentLevel);
+	}
+	return baseLogger;
+}
+
+export function childLogger(
+	bindings: Record<string, unknown> = {}
+): winston.Logger {
+	return getLogger().child(bindings);
+}
+
+```
+
+```text
+# src/tools/errors.ts
+```
+```ts
+export class ToolError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'ToolError';
+	}
+}
+
+export class ToolNotFoundError extends ToolError {
+	constructor(public readonly tool: string) {
+		super(`Tool not found: ${tool}`);
+		this.name = 'ToolNotFoundError';
+	}
+}
+
+export class ToolPermissionError extends ToolError {
+	constructor(
+		public readonly tool: string,
+		public readonly reason: string
+	) {
+		super(`Permission denied for ${tool}: ${reason}`);
+		this.name = 'ToolPermissionError';
+	}
+}
+
+export class ToolValidationError extends ToolError {
+	constructor(
+		public readonly tool: string,
+		public readonly issues: string[]
+	) {
+		super(
+			issues.length
+				? `Invalid parameters for ${tool}:\n- ${issues.join('\n- ')}`
+				: `Invalid parameters for ${tool}`
+		);
+		this.name = 'ToolValidationError';
+	}
+}
+
+export class ToolExecutionError extends ToolError {
+	constructor(
+		public readonly tool: string,
+		cause: unknown
+	) {
+		super(
+			`Execution failed for ${tool}: ${cause instanceof Error ? cause.message : String(cause)}`
+		);
+		this.name = 'ToolExecutionError';
+		this.cause = cause;
+	}
+}
+
+```
+
+```text
+# src/tools/types.ts
+```
+```ts
+export type Permission = 'fs' | 'net' | 'shell';
+
+export interface ToolSpec {
+	/** Unique tool name, e.g. "fs.read" */
+	name: string;
+	title?: string;
+	description?: string;
+	/** Minimal permissions the tool needs to run */
+	requiredPermissions?: Permission[];
+	/**
+	 * JSON Schema (Draft 2020-12 compatible) describing the params payload.
+	 * If omitted, no validation is performed.
+	 */
+	paramsSchema?: Record<string, unknown>;
+}
+
+export interface ToolPolicy {
+	/**
+	 * If provided, only these tools are allowed. If omitted, all tools are allowed
+	 * unless explicitly listed in deniedTools.
+	 */
+	allowedTools?: string[];
+	/** Always deny these tools. Takes precedence over allowedTools. */
+	deniedTools?: string[];
+	/**
+	 * If provided, a tool may execute only if (requiredPermissions ⊆ allowPermissions).
+	 * If omitted, all permissions are allowed unless explicitly denied.
+	 */
+	allowPermissions?: Permission[];
+	/** Required permissions intersecting denyPermissions cause a denial. */
+	denyPermissions?: Permission[];
+}
+
+export interface ToolContext {
+	/** Working directory or project root. */
+	cwd: string;
+	/** Current policy for gating tools. */
+	policy: ToolPolicy;
+	/** Optional logger facade (keep it tiny to avoid coupling) */
+	logger?: {
+		debug?: (msg: string, meta?: unknown) => void;
+		info?: (msg: string, meta?: unknown) => void;
+		warn?: (msg: string, meta?: unknown) => void;
+		error?: (msg: string, meta?: unknown) => void;
+	};
+}
+
+export type ToolHandler = (
+	params: unknown,
+	ctx: ToolContext
+) => Promise<unknown> | unknown;
+
+export interface RegisteredTool {
+	spec: ToolSpec;
+	handler: ToolHandler;
+}
+
+```
+
+```text
+# src/tools/registry.ts
+```
+```ts
+import {
+	ToolError,
+	ToolExecutionError,
+	ToolNotFoundError,
+	ToolPermissionError,
+	ToolValidationError,
+} from '@tools/errors';
+import type {
+	RegisteredTool,
+	ToolContext,
+	ToolHandler,
+	ToolPolicy,
+	ToolSpec,
+} from '@tools/types';
+import type { AjvLike } from '@tools/validator';
+import { formatAjvErrors, makeAjv } from '@tools/validator';
+
+type ValidatorFn = (data: unknown) => boolean;
+
+export class ToolRegistry {
+	private readonly ajv: AjvLike;
+	private readonly tools = new Map<string, RegisteredTool>();
+	private readonly validators = new Map<string, ValidatorFn>();
+
+	constructor(ajv?: AjvLike) {
+		this.ajv = ajv ?? makeAjv();
+	}
+
+	register(spec: ToolSpec, handler: ToolHandler): void {
+		if (!spec?.name || typeof spec.name !== 'string') {
+			throw new Error('Tool spec must include a non-empty name');
+		}
+		if (this.tools.has(spec.name)) {
+			throw new Error(`Tool already registered: ${spec.name}`);
+		}
+		this.tools.set(spec.name, { spec, handler });
+		if (spec.paramsSchema) {
+			const validate = this.ajv.compile(spec.paramsSchema);
+			this.validators.set(spec.name, validate);
+		}
+	}
+
+	list(): ToolSpec[] {
+		return Array.from(this.tools.values()).map((t) => t.spec);
+	}
+
+	get(name: string): RegisteredTool {
+		const t = this.tools.get(name);
+		if (!t) {
+			throw new ToolNotFoundError(name);
+		}
+		return t;
+	}
+
+	private ensureAllowed(name: string, spec: ToolSpec, policy?: ToolPolicy) {
+		const deniedTools = new Set(policy?.deniedTools ?? []);
+		if (deniedTools.has(name)) {
+			throw new ToolPermissionError(
+				name,
+				`Tool denied by policy: ${name}`
+			);
+		}
+
+		if (policy?.allowedTools) {
+			const allowedTools = new Set(policy.allowedTools);
+			if (!allowedTools.has(name)) {
+				throw new ToolPermissionError(
+					name,
+					`Tool not allowed by policy: ${name}`
+				);
+			}
+		}
+
+		const req = new Set(spec.requiredPermissions ?? []);
+		const denyPerms = new Set(policy?.denyPermissions ?? []);
+		for (const p of req) {
+			if (denyPerms.has(p)) {
+				throw new ToolPermissionError(name, `Permission denied: ${p}`);
+			}
+		}
+
+		if (policy?.allowPermissions) {
+			const allowPerms = new Set(policy.allowPermissions);
+			for (const p of req) {
+				if (!allowPerms.has(p)) {
+					throw new ToolPermissionError(
+						name,
+						`Permission not granted: ${p}`
+					);
+				}
+			}
+		}
+	}
+
+	private validateParams(name: string, params: unknown): void {
+		const validate = this.validators.get(name);
+		if (!validate) {
+			return; // no schema => nothing to validate
+		}
+		const ok = validate(params);
+		if (!ok) {
+			const issues = formatAjvErrors(
+				(validate as unknown as { errors?: unknown })
+					.errors as unknown[] as never
+			);
+			throw new ToolValidationError(name, issues);
+		}
+	}
+
+	async run<T = unknown>(
+		name: string,
+		params: unknown,
+		ctx: ToolContext
+	): Promise<T> {
+		const reg = this.get(name);
+		this.ensureAllowed(name, reg.spec, ctx.policy);
+		this.validateParams(name, params);
+
+		try {
+			const res = await reg.handler(params, ctx);
+			return res as T;
+		} catch (e) {
+			if (e instanceof ToolError) {
+				throw e;
+			}
+
+			throw new ToolExecutionError(name, e);
+		}
+	}
+}
+
+```
+
+```text
+# src/tools/fs.ts
+```
+```ts
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { childLogger } from '@obs/logger';
+import { ToolPermissionError } from '@tools/errors';
+import type { ToolRegistry } from '@tools/registry';
+import type { ToolHandler, ToolSpec } from '@tools/types';
+import { applyPatch, createTwoFilesPatch } from 'diff';
+
+const log = childLogger({ mod: 'tools.fs' });
+
+type Json = Record<string, unknown>;
+
+function toPosix(p: string): string {
+	return p.split(path.sep).join('/');
+}
+
+function sha256(buf: Buffer): string {
+	const h = crypto.createHash('sha256');
+	h.update(buf);
+	return h.digest('hex');
+}
+
+function isBinaryBuffer(buf: Buffer): boolean {
+	if (buf.includes(0)) {
+		return true;
+	}
+	let nonPrintable = 0;
+	const n = Math.min(buf.length, 8192);
+	for (let i = 0; i < n; i++) {
+		const c = buf[i];
+		const printable =
+			c === 0x09 || c === 0x0a || c === 0x0d || (c >= 0x20 && c <= 0x7e);
+		if (!printable) {
+			nonPrintable++;
+		}
+	}
+	return nonPrintable / Math.max(1, n) > 0.3;
+}
+
+function ensureDir(dir: string): void {
+	if (!fs.existsSync(dir)) {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+}
+
+function resolveInSandbox(cwd: string, rel: string): string {
+	const abs = path.resolve(cwd, rel);
+	const relFromRoot = path.relative(cwd, abs);
+	// outside root -> '../' prefix or absolute
+	if (relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) {
+		log.warn({
+			msg: 'fs.path-escape-detected',
+			cwd,
+			requested: rel,
+			resolved: abs,
+		});
+		throw new ToolPermissionError('fs', `Path escapes sandbox: ${rel}`);
+	}
+	return abs;
+}
+
+function guardSymlinkWrites(absPath: string, op: string): void {
+	try {
+		const st = fs.lstatSync(absPath);
+		if (st.isSymbolicLink()) {
+			// resolve and ensure still inside parent dir
+			const real = fs.realpathSync(absPath);
+			const base = fs.realpathSync(path.dirname(absPath));
+			const rel = path.relative(base, real);
+			if (rel.startsWith('..') || path.isAbsolute(rel)) {
+				log.warn({
+					msg: 'fs.symlink-outside-sandbox',
+					op,
+					target: toPosix(absPath),
+					real: toPosix(real),
+				});
+				throw new ToolPermissionError(
+					`fs.${op}`,
+					`Refusing to follow symlink outside sandbox: ${toPosix(absPath)} -> ${toPosix(real)}`
+				);
+			}
+			// more conservative: disallow writing via symlink entirely
+			log.warn({
+				msg: 'fs.symlink-write-denied',
+				op,
+				target: toPosix(absPath),
+			});
+			throw new ToolPermissionError(
+				`fs.${op}`,
+				`Refusing to write via symlink: ${toPosix(absPath)}`
+			);
+		}
+	} catch {
+		// path may not exist yet; check parent dir realpath
+		const parent = fs.realpathSync(path.dirname(absPath));
+		const rel = path.relative(parent, absPath);
+		if (rel.startsWith('..') || path.isAbsolute(rel)) {
+			log.warn({
+				msg: 'fs.parent-escape-detected',
+				op,
+				parent: toPosix(parent),
+				target: toPosix(absPath),
+			});
+			throw new ToolPermissionError(
+				`fs.${op}`,
+				`Parent directory escapes sandbox: ${toPosix(absPath)}`
+			);
+		}
+	}
+}
+
+function readTextFile(
+	absPath: string,
+	maxBytes: number
+): {
+	content?: string;
+	buf?: Buffer;
+	binary: boolean;
+	bytes: number;
+	truncated: boolean;
+} {
+	if (!fs.existsSync(absPath)) {
+		return { binary: false, bytes: 0, truncated: false };
+	}
+	const st = fs.statSync(absPath);
+	const size = st.size;
+	const readBytes = Math.min(size, maxBytes);
+	const buf = fs.readFileSync(absPath).subarray(0, readBytes);
+	const binary = isBinaryBuffer(buf);
+	if (binary) {
+		return { binary: true, bytes: size, truncated: size > maxBytes, buf };
+	}
+	return {
+		binary: false,
+		bytes: size,
+		truncated: size > maxBytes,
+		content: buf.toString('utf8'),
+		buf,
+	};
+}
+
+const FsListSpec: ToolSpec = {
+	name: 'fs.list',
+	title: 'List directory',
+	description: 'List entries under a directory within the sandbox.',
+	requiredPermissions: ['fs'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			path: { type: 'string', minLength: 1 },
+			recursive: { type: 'boolean', default: false },
+			includeFiles: { type: 'boolean', default: true },
+			includeDirs: { type: 'boolean', default: true },
+			maxEntries: { type: 'integer', minimum: 1, default: 10_000 },
+		},
+		required: ['path'],
+	},
+};
+
+const FsReadSpec: ToolSpec = {
+	name: 'fs.read',
+	title: 'Read file',
+	description: 'Read a text file within the sandbox (binary-safe metadata).',
+	requiredPermissions: ['fs'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			path: { type: 'string', minLength: 1 },
+			maxBytes: { type: 'integer', minimum: 1, default: 1_048_576 },
+		},
+		required: ['path'],
+	},
+};
+
+const FsWriteSpec: ToolSpec = {
+	name: 'fs.write',
+	title: 'Write file (with diff preview)',
+	description:
+		'Write text content to a file. Provides unified diff preview. Blocks binary/symlink edits.',
+	requiredPermissions: ['fs'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			path: { type: 'string', minLength: 1 },
+			content: { type: 'string' },
+			create: { type: 'boolean', default: true },
+			overwrite: { type: 'boolean', default: true },
+			preview: { type: 'boolean', default: false },
+			maxBytes: { type: 'integer', minimum: 1, default: 5_242_880 },
+		},
+		required: ['path', 'content'],
+	},
+};
+
+const FsAppendSpec: ToolSpec = {
+	name: 'fs.append',
+	title: 'Append to file (with diff preview)',
+	description:
+		'Append text to a file. Provides unified diff preview. Blocks binary/symlink edits.',
+	requiredPermissions: ['fs'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			path: { type: 'string', minLength: 1 },
+			content: { type: 'string' },
+			create: { type: 'boolean', default: true },
+			preview: { type: 'boolean', default: false },
+			maxBytes: { type: 'integer', minimum: 1, default: 5_242_880 },
+		},
+		required: ['path', 'content'],
+	},
+};
+
+const FsSearchSpec: ToolSpec = {
+	name: 'fs.search',
+	title: 'Search text',
+	description:
+		'Search for a string or regex across files under a directory within the sandbox.',
+	requiredPermissions: ['fs'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			root: { type: 'string', default: '.' },
+			paths: {
+				type: 'array',
+				items: { type: 'string' },
+				default: [] as string[],
+			},
+			query: { type: 'string', minLength: 1 },
+			regex: { type: 'boolean', default: false },
+			caseSensitive: { type: 'boolean', default: false },
+			maxMatches: { type: 'integer', minimum: 1, default: 500 },
+			maxFileBytes: { type: 'integer', minimum: 1, default: 1_048_576 },
+		},
+		required: ['query'],
+	},
+};
+
+const FsPatchSpec: ToolSpec = {
+	name: 'fs.patch',
+	title: 'Apply unified diff patch',
+	description:
+		'Apply a unified diff (patch) to a file. Provides preview capability. Blocks binary/symlink edits.',
+	requiredPermissions: ['fs'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			path: { type: 'string', minLength: 1 },
+			patch: { type: 'string', minLength: 1 },
+			preview: { type: 'boolean', default: false },
+			maxBytes: { type: 'integer', minimum: 1, default: 5_242_880 },
+		},
+		required: ['path', 'patch'],
+	},
+};
+
+const listHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
+	const p = params as {
+		path: string;
+		recursive?: boolean;
+		includeFiles?: boolean;
+		includeDirs?: boolean;
+		maxEntries?: number;
+	};
+	const base = resolveInSandbox(ctx.cwd, p.path);
+	const recursive = p.recursive ?? false;
+	const includeFiles = p.includeFiles ?? true;
+	const includeDirs = p.includeDirs ?? true;
+	const maxEntries = Math.max(1, p.maxEntries ?? 10_000);
+
+	log.debug({
+		msg: 'fs.list.start',
+		base: toPosix(path.relative(ctx.cwd, base)),
+		recursive,
+		includeFiles,
+		includeDirs,
+		maxEntries,
+	});
+
+	const out: Array<{
+		path: string;
+		type: 'file' | 'dir';
+		size: number;
+		mtimeMs: number;
+	}> = [];
+
+	function walk(dir: string) {
+		const entries = fs.readdirSync(dir, { withFileTypes: true });
+		for (const e of entries) {
+			const abs = path.join(dir, e.name);
+			const st = fs.statSync(abs);
+			const type = e.isDirectory()
+				? 'dir'
+				: e.isFile()
+					? 'file'
+					: undefined;
+			if (!type) {
+				continue;
+			}
+			if (type === 'dir' && includeDirs) {
+				out.push({
+					path: toPosix(path.relative(ctx.cwd, abs)),
+					type,
+					size: 0,
+					mtimeMs: st.mtimeMs,
+				});
+			}
+			if (type === 'file' && includeFiles) {
+				out.push({
+					path: toPosix(path.relative(ctx.cwd, abs)),
+					type,
+					size: st.size,
+					mtimeMs: st.mtimeMs,
+				});
+			}
+			if (out.length >= maxEntries) {
+				return;
+			}
+			if (recursive && e.isDirectory()) {
+				walk(abs);
+			}
+		}
+	}
+
+	const st = fs.statSync(base);
+	if (st.isDirectory()) {
+		walk(base);
+	} else if (st.isFile()) {
+		out.push({
+			path: toPosix(path.relative(ctx.cwd, base)),
+			type: 'file',
+			size: st.size,
+			mtimeMs: st.mtimeMs,
+		});
+	}
+	const res = {
+		entries: out.slice(0, maxEntries),
+		truncated: out.length > maxEntries,
+	};
+	log.debug({
+		msg: 'fs.list.done',
+		count: res.entries.length,
+		truncated: res.truncated,
+		ms: Date.now() - t0,
+	});
+	return res;
+};
+
+const readHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
+	const p = params as { path: string; maxBytes?: number };
+	const abs = resolveInSandbox(ctx.cwd, p.path);
+	const maxBytes = Math.max(1, p.maxBytes ?? 1_048_576);
+
+	log.debug({
+		msg: 'fs.read.start',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		maxBytes,
+	});
+
+	const r = readTextFile(abs, maxBytes);
+	const meta = {
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		bytes: r.bytes,
+		truncated: r.truncated,
+	};
+	const out = r.binary
+		? ({
+				...meta,
+				binary: true,
+				sha256: r.buf ? sha256(r.buf) : undefined,
+			} as Json)
+		: ({
+				...meta,
+				binary: false,
+				content: r.content ?? '',
+				sha256: r.buf ? sha256(r.buf) : undefined,
+			} as Json);
+
+	log.debug({
+		msg: 'fs.read.done',
+		path: meta.path,
+		binary: r.binary,
+		bytes: r.bytes,
+		truncated: r.truncated,
+		ms: Date.now() - t0,
+	});
+	return out;
+};
+
+function prepareWrite(
+	abs: string,
+	content: string,
+	maxBytes: number
+): {
+	oldText: string;
+	oldExists: boolean;
+	oldBinary: boolean;
+	diff: string;
+} {
+	const r = readTextFile(abs, maxBytes);
+	const oldExists = fs.existsSync(abs);
+	const oldBinary = r.binary;
+	const oldText = r.binary ? '' : (r.content ?? '');
+	const diff = createTwoFilesPatch(
+		abs,
+		abs,
+		oldText,
+		content,
+		'before',
+		'after'
+	);
+	return { oldText, oldExists, oldBinary, diff };
+}
+
+const writeHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
+	const p = params as {
+		path: string;
+		content: string;
+		create?: boolean;
+		overwrite?: boolean;
+		preview?: boolean;
+		maxBytes?: number;
+	};
+	const abs = resolveInSandbox(ctx.cwd, p.path);
+	guardSymlinkWrites(abs, 'write');
+
+	const create = p.create ?? true;
+	const overwrite = p.overwrite ?? true;
+	const preview = p.preview ?? false;
+	const maxBytes = Math.max(1, p.maxBytes ?? 5_242_880);
+
+	const exists = fs.existsSync(abs);
+	if (exists && !overwrite) {
+		log.warn({
+			msg: 'fs.write.overwrite-denied',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
+		throw new ToolPermissionError(
+			'fs.write',
+			`Refusing to overwrite existing file: ${toPosix(p.path)}`
+		);
+	}
+	if (!(exists || create)) {
+		log.warn({
+			msg: 'fs.write.create-denied',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
+		throw new ToolPermissionError(
+			'fs.write',
+			`Refusing to create new file: ${toPosix(p.path)}`
+		);
+	}
+
+	const { oldExists, oldBinary, diff } = prepareWrite(
+		abs,
+		p.content,
+		maxBytes
+	);
+	if (oldExists && oldBinary) {
+		log.warn({
+			msg: 'fs.write.binary-refused',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
+		throw new ToolPermissionError(
+			'fs.write',
+			`Target is binary; refusing to edit: ${toPosix(p.path)}`
+		);
+	}
+
+	const diffBytes = Buffer.byteLength(diff, 'utf8');
+	const diffLines = diff.split('\n').length;
+
+	if (preview) {
+		log.debug({
+			msg: 'fs.write.preview',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diffBytes,
+			diffLines,
+			ms: Date.now() - t0,
+		});
+		return {
+			preview: true,
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diff,
+		} as Json;
+	}
+
+	ensureDir(path.dirname(abs));
+	fs.writeFileSync(abs, p.content, 'utf8');
+	log.info({
+		msg: 'fs.write.ok',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		bytes: Buffer.byteLength(p.content, 'utf8'),
+		diffBytes,
+		diffLines,
+		ms: Date.now() - t0,
+	});
+	return {
+		written: true,
+		bytes: Buffer.byteLength(p.content, 'utf8'),
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		diff,
+	} as Json;
+};
+
+const appendHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
+	const p = params as {
+		path: string;
+		content: string;
+		create?: boolean;
+		preview?: boolean;
+		maxBytes?: number;
+	};
+	const abs = resolveInSandbox(ctx.cwd, p.path);
+	guardSymlinkWrites(abs, 'append');
+
+	const create = p.create ?? true;
+	const preview = p.preview ?? false;
+	const maxBytes = Math.max(1, p.maxBytes ?? 5_242_880);
+
+	const exists = fs.existsSync(abs);
+	if (!(exists || create)) {
+		log.warn({
+			msg: 'fs.append.create-denied',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
+		throw new ToolPermissionError(
+			'fs.append',
+			`Refusing to create new file: ${toPosix(p.path)}`
+		);
+	}
+
+	const r = readTextFile(abs, maxBytes);
+	if (exists && r.binary) {
+		log.warn({
+			msg: 'fs.append.binary-refused',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
+		throw new ToolPermissionError(
+			'fs.append',
+			`Target is binary; refusing to edit: ${toPosix(p.path)}`
+		);
+	}
+	const oldText = r.binary ? '' : (r.content ?? '');
+	const newText = oldText + p.content;
+	const diff = createTwoFilesPatch(
+		abs,
+		abs,
+		oldText,
+		newText,
+		'before',
+		'after'
+	);
+
+	const diffBytes = Buffer.byteLength(diff, 'utf8');
+	const diffLines = diff.split('\n').length;
+
+	if (preview) {
+		log.debug({
+			msg: 'fs.append.preview',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diffBytes,
+			diffLines,
+			ms: Date.now() - t0,
+		});
+		return {
+			preview: true,
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diff,
+		} as Json;
+	}
+
+	ensureDir(path.dirname(abs));
+	fs.writeFileSync(abs, newText, 'utf8');
+	log.info({
+		msg: 'fs.append.ok',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		appendedBytes: Buffer.byteLength(p.content, 'utf8'),
+		diffBytes,
+		diffLines,
+		ms: Date.now() - t0,
+	});
+	return {
+		appended: true,
+		bytes: Buffer.byteLength(p.content, 'utf8'),
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		diff,
+	} as Json;
+};
+
+const searchHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
+	const p = params as {
+		root?: string;
+		paths?: string[];
+		query: string;
+		regex?: boolean;
+		caseSensitive?: boolean;
+		maxMatches?: number;
+		maxFileBytes?: number;
+	};
+	const rootAbs = resolveInSandbox(ctx.cwd, p.root ?? '.');
+	const searchPaths = (p.paths ?? []).length ? p.paths : ['.'];
+	const maxMatches = Math.max(1, p.maxMatches ?? 500);
+	const maxFileBytes = Math.max(1, p.maxFileBytes ?? 1_048_576);
+
+	log.debug({
+		msg: 'fs.search.start',
+		root: toPosix(path.relative(ctx.cwd, rootAbs)),
+		paths: searchPaths,
+		regex: p.regex ?? false,
+		caseSensitive: p.caseSensitive ?? false,
+		maxMatches,
+		maxFileBytes,
+		queryLen: p.query?.length ?? 0,
+	});
+
+	const results: Array<{
+		file: string;
+		line: number;
+		column: number;
+		match: string;
+		lineText: string;
+	}> = [];
+	const needle = p.query;
+	const re =
+		p.regex === true
+			? new RegExp(needle, p.caseSensitive ? 'g' : 'gi')
+			: null;
+	const incr = (fileAbs: string) => {
+		const r = readTextFile(fileAbs, maxFileBytes);
+		if (r.binary || !r.content) {
+			return;
+		}
+		const lines = r.content.split(/\r?\n/);
+		for (let i = 0; i < lines.length; i++) {
+			if (results.length >= maxMatches) {
+				return;
+			}
+			const line = lines[i];
+			if (re) {
+				let m: RegExpExecArray | null;
+				const rx = new RegExp(
+					re.source,
+					re.flags.includes('g') ? re.flags : `${re.flags}g`
+				);
+				m = rx.exec(line);
+				if (m) {
+					results.push({
+						file: toPosix(path.relative(ctx.cwd, fileAbs)),
+						line: i + 1,
+						column: Math.max(1, (m.index ?? 0) + 1),
+						match: m[0] ?? '',
+						lineText: line,
+					});
+				}
+			} else {
+				const hay = p.caseSensitive ? line : line.toLowerCase();
+				const ndl = p.caseSensitive ? needle : needle.toLowerCase();
+				const idx = hay.indexOf(ndl);
+				if (idx >= 0) {
+					results.push({
+						file: toPosix(path.relative(ctx.cwd, fileAbs)),
+						line: i + 1,
+						column: idx + 1,
+						match: line.slice(idx, idx + ndl.length),
+						lineText: line,
+					});
+				}
+			}
+		}
+	};
+
+	function walk(startAbs: string) {
+		const st = fs.statSync(startAbs);
+		if (st.isFile()) {
+			incr(startAbs);
+			return;
+		}
+		if (!st.isDirectory()) {
+			return;
+		}
+		const entries = fs.readdirSync(startAbs, { withFileTypes: true });
+		for (const e of entries) {
+			if (results.length >= maxMatches) {
+				return;
+			}
+			const abs = path.join(startAbs, e.name);
+			try {
+				const lst = fs.lstatSync(abs);
+				if (lst.isSymbolicLink()) {
+					continue; // skip symlinks
+				}
+			} catch {
+				continue;
+			}
+			if (e.isDirectory()) {
+				walk(abs);
+			} else if (e.isFile()) {
+				incr(abs);
+			}
+		}
+	}
+
+	for (const pth of searchPaths ?? []) {
+		const abs = resolveInSandbox(rootAbs, pth);
+		walk(abs);
+		if (results.length >= maxMatches) {
+			break;
+		}
+	}
+
+	const res = { matches: results, truncated: results.length >= maxMatches };
+	log.debug({
+		msg: 'fs.search.done',
+		matches: res.matches.length,
+		truncated: res.truncated,
+		ms: Date.now() - t0,
+	});
+	return res;
+};
+
+const patchHandler: ToolHandler = (params, ctx) => {
+	const t0 = Date.now();
+	const p = params as {
+		path: string;
+		patch: string;
+		preview?: boolean;
+		maxBytes?: number;
+	};
+	const abs = resolveInSandbox(ctx.cwd, p.path);
+	guardSymlinkWrites(abs, 'patch');
+
+	const maxBytes = Math.max(1, p.maxBytes ?? 5_242_880);
+	const r = readTextFile(abs, maxBytes);
+	if (r.binary) {
+		log.warn({
+			msg: 'fs.patch.binary-refused',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+		});
+		throw new ToolPermissionError(
+			'fs.patch',
+			`Target is binary; refusing to edit: ${toPosix(p.path)}`
+		);
+	}
+	const oldText = r.content ?? '';
+	let applied: string | false;
+
+	try {
+		applied = applyPatch(oldText, p.patch);
+	} catch {
+		applied = false;
+	}
+
+	if (applied === false) {
+		log.warn({
+			msg: 'fs.patch.apply-failed',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			preview: p.preview === true,
+		});
+		if (p.preview === true) {
+			return {
+				preview: true,
+				path: toPosix(path.relative(ctx.cwd, abs)),
+				error: 'Invalid or unsupported patch format',
+			} as Json;
+		}
+
+		return {
+			applied: false,
+			error: 'Invalid or unsupported patch format',
+		} as Json;
+	}
+
+	if (p.preview === true) {
+		const diff = createTwoFilesPatch(
+			abs,
+			abs,
+			oldText,
+			applied,
+			'before',
+			'after'
+		);
+		log.debug({
+			msg: 'fs.patch.preview',
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diffBytes: Buffer.byteLength(diff, 'utf8'),
+			diffLines: diff.split('\n').length,
+			ms: Date.now() - t0,
+		});
+		return {
+			preview: true,
+			path: toPosix(path.relative(ctx.cwd, abs)),
+			diff,
+		} as Json;
+	}
+
+	ensureDir(path.dirname(abs));
+	fs.writeFileSync(abs, applied, 'utf8');
+	log.info({
+		msg: 'fs.patch.applied',
+		path: toPosix(path.relative(ctx.cwd, abs)),
+		ms: Date.now() - t0,
+	});
+	return {
+		applied: true,
+		path: toPosix(path.relative(ctx.cwd, abs)),
+	} as Json;
+};
+
+export function registerFsTools(reg: ToolRegistry): void {
+	reg.register(FsListSpec, listHandler);
+	reg.register(FsReadSpec, readHandler);
+	reg.register(FsWriteSpec, writeHandler);
+	reg.register(FsAppendSpec, appendHandler);
+	reg.register(FsSearchSpec, searchHandler);
+	reg.register(FsPatchSpec, patchHandler);
+}
+
+```
+
+```text
+# src/tools/shell.ts
+```
+```ts
+import { type ChildProcess, spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { childLogger } from '@obs/logger';
+import { ToolExecutionError, ToolPermissionError } from '@tools/errors';
+import type { ToolRegistry } from '@tools/registry';
+import type { ToolHandler, ToolSpec } from '@tools/types';
+
+const log = childLogger({ mod: 'tools.shell' });
+
+type Json = Record<string, unknown>;
+
+function ensureInside(base: string, dir: string): string {
+	const abs = path.resolve(base, dir);
+	const rel = path.relative(base, abs);
+	if (rel.startsWith('..') || path.isAbsolute(rel)) {
+		log.warn({
+			msg: 'shell.cwd-escape',
+			base,
+			dir,
+			resolved: abs,
+		});
+		throw new ToolPermissionError(
+			'shell.exec',
+			`cwd escapes sandbox: ${dir}`
+		);
+	}
+	return abs;
+}
+
+function sha8(s: string): string {
+	return crypto
+		.createHash('sha256')
+		.update(s, 'utf8')
+		.digest('hex')
+		.slice(0, 8);
+}
+
+/** Tokenize a shell-ish string minimally for heuristics (whitespace split, drop empties). */
+function looseTokens(s: string): string[] {
+	return s
+		.trim()
+		.split(/\s+/g)
+		.filter((t) => t.length > 0);
+}
+
+/** Detect potentially destructive commands; returns reasons (empty => not destructive). */
+function detectDestructive(tokens: string[]): string[] {
+	if (tokens.length === 0) {
+		return [];
+	}
+	const t0 = tokens[0] ?? '';
+
+	const reasons: string[] = [];
+
+	// rm -r / -rf * . ..
+	if (t0 === 'rm') {
+		const hasR = tokens.some((t) => /^-.*r/.test(t));
+		const hasF = tokens.some((t) => /^-.*f/.test(t));
+		const wild = tokens.some(
+			(t) => t === '*' || t === '*/' || t.endsWith('/*')
+		);
+		const rooty = tokens.some(
+			(t) => t === '/' || t === '.' || t === '..' || t.startsWith('/')
+		);
+		if (hasR && (hasF || wild || rooty)) {
+			reasons.push('rm -r/-rf with wildcard or root-like target');
+		}
+	}
+
+	// git reset --hard | git clean -fdx
+	if (t0 === 'git') {
+		if (tokens.includes('reset') && tokens.some((t) => t === '--hard')) {
+			reasons.push('git reset --hard');
+		}
+		if (
+			tokens.includes('clean') &&
+			tokens.some((t) => /^-.*f/.test(t)) &&
+			(tokens.some((t) => /^-.*d/.test(t)) ||
+				tokens.some((t) => /^-.*x/.test(t)))
+		) {
+			reasons.push('git clean with -f and -d/-x');
+		}
+	}
+
+	// chmod -R / chown -R
+	if (
+		(t0 === 'chmod' || t0 === 'chown') &&
+		tokens.some((t) => /^-.*R/.test(t))
+	) {
+		reasons.push(`${t0} -R`);
+	}
+
+	// find ... -delete
+	if (t0 === 'find' && tokens.includes('-delete')) {
+		reasons.push('find -delete');
+	}
+
+	return reasons;
+}
+
+const ShellExecSpec: ToolSpec = {
+	name: 'shell.exec',
+	title: 'Run a command',
+	description:
+		'Execute a command in a sandboxed working directory. Destructive commands require typed confirmation. Non-interactive mode throws on non-zero exit.',
+	requiredPermissions: ['shell'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			command: { type: 'string', minLength: 1 },
+			args: {
+				type: 'array',
+				items: { type: 'string' },
+				default: [] as string[],
+			},
+			shell: { type: 'boolean', default: false },
+			cwd: { type: 'string', default: '.' },
+			env: {
+				type: 'object',
+				additionalProperties: { type: 'string' },
+				default: {} as Record<string, string>,
+			},
+			timeoutMs: { type: 'integer', minimum: 100, default: 30_000 },
+			interactive: { type: 'boolean', default: false },
+			confirm: { type: 'string' },
+			preview: { type: 'boolean', default: false },
+			maxOutputBytes: {
+				type: 'integer',
+				minimum: 1024,
+				default: 1_048_576,
+			},
+		},
+		required: ['command'],
+	},
+};
+
+const execHandler: ToolHandler = async (params, ctx) => {
+	const started = Date.now();
+
+	const p = params as {
+		command: string;
+		args?: string[];
+		shell?: boolean;
+		cwd?: string;
+		env?: Record<string, string>;
+		timeoutMs?: number;
+		interactive?: boolean;
+		confirm?: string;
+		preview?: boolean;
+		maxOutputBytes?: number;
+	};
+
+	// sandboxed working dir
+	const cwdUsed = ensureInside(ctx.cwd, p.cwd ?? '.');
+
+	// normalize tokens for detection
+	const tokens =
+		p.shell === true
+			? looseTokens(p.command)
+			: [p.command, ...(p.args ?? [])];
+
+	// destructive detection
+	const reasons = detectDestructive(tokens);
+	const destructive = reasons.length > 0;
+
+	// Stable token tied to cwd + tokens
+	const tokenBase = JSON.stringify({ cwd: cwdUsed, tokens });
+	const confirmToken = sha8(tokenBase);
+
+	// Preview or missing confirmation
+	if (p.preview === true || (destructive && p.confirm !== confirmToken)) {
+		log.info({
+			msg: 'shell.exec.preview',
+			cwd: cwdUsed,
+			command: p.command,
+			argsCount: p.shell ? undefined : (p.args ?? []).length,
+			shell: p.shell ?? false,
+			destructive,
+			reasons,
+			requiresConfirmation: destructive,
+		});
+		return {
+			preview: true,
+			requiresConfirmation: destructive,
+			confirmToken,
+			destructive,
+			reasons,
+			cwd: cwdUsed,
+			command: p.command,
+			args: p.shell ? undefined : (p.args ?? []),
+			shell: p.shell ?? false,
+		} as Json;
+	}
+
+	// --- build spawn args/options (always 3-arg overload) ---
+	const timeoutMs = Math.max(100, p.timeoutMs ?? 30_000);
+	const maxOutput = Math.max(1024, p.maxOutputBytes ?? 1_048_576);
+	const shellFlag = p.shell === true;
+
+	const args = p.args ?? []; // may be empty even when shell=true
+	const options = {
+		cwd: cwdUsed,
+		env: { ...process.env, ...(p.env ?? {}) },
+		shell: shellFlag,
+	} as const;
+
+	log.info({
+		msg: 'shell.exec.start',
+		cwd: cwdUsed,
+		command: p.command,
+		argsCount: shellFlag ? undefined : args.length,
+		shell: shellFlag,
+		timeoutMs,
+		maxOutputBytes: maxOutput,
+	});
+
+	const child: ChildProcess = spawn(p.command, args, options);
+
+	const stdoutBufs: Buffer[] = [];
+	const stderrBufs: Buffer[] = [];
+	let outBytes = 0;
+	let errBytes = 0;
+	let outTrunc = false;
+	let errTrunc = false;
+
+	const toBuf = (d: unknown): Buffer =>
+		Buffer.isBuffer(d) ? d : Buffer.from(String(d ?? ''), 'utf8');
+
+	const pushOut = (chunk: Buffer) => {
+		if (outBytes >= maxOutput) {
+			outTrunc = true;
+			return;
+		}
+		const room = maxOutput - outBytes;
+		const slice = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
+		stdoutBufs.push(slice);
+		outBytes += slice.byteLength;
+		if (chunk.byteLength > room) {
+			outTrunc = true;
+		}
+	};
+
+	const pushErr = (chunk: Buffer) => {
+		if (errBytes >= maxOutput) {
+			errTrunc = true;
+			return;
+		}
+		const room = maxOutput - errBytes;
+		const slice = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
+		stderrBufs.push(slice);
+		errBytes += slice.byteLength;
+		if (chunk.byteLength > room) {
+			errTrunc = true;
+		}
+	};
+
+	if (child.stdout) {
+		child.stdout.on('data', (d: unknown) => pushOut(toBuf(d)));
+	}
+	if (child.stderr) {
+		child.stderr.on('data', (d: unknown) => pushErr(toBuf(d)));
+	}
+
+	let timedOut = false;
+	const killer = setTimeout(() => {
+		timedOut = true;
+		try {
+			child.kill('SIGKILL');
+			log.warn({
+				msg: 'shell.exec.timeout-kill',
+				cwd: cwdUsed,
+				command: p.command,
+				timeoutMs,
+			});
+		} catch {
+			/* ignore */
+		}
+	}, timeoutMs);
+
+	const exit = await new Promise<{
+		code: number | null;
+		signal: NodeJS.Signals | null;
+	}>((resolve) => {
+		child.on('error', (err) => {
+			log.error({ msg: 'shell.exec.spawn-error', error: err?.message });
+			resolve({ code: null, signal: null });
+		});
+		child.on('close', (code, signal) => resolve({ code, signal }));
+	});
+
+	clearTimeout(killer);
+
+	const stdout = Buffer.concat(stdoutBufs).toString('utf8');
+	const stderr = Buffer.concat(stderrBufs).toString('utf8');
+	const durationMs = Date.now() - started;
+
+	const result = {
+		ok: exit.code === 0 && !timedOut,
+		exitCode: exit.code,
+		signal: exit.signal ?? undefined,
+		stdout,
+		stderr,
+		truncatedStdout: outTrunc,
+		truncatedStderr: errTrunc,
+		timedOut,
+		killed: timedOut,
+		durationMs,
+		cwd: cwdUsed,
+		command: p.command,
+		args: p.shell ? undefined : (p.args ?? []),
+		shell: shellFlag,
+	} as Json;
+
+	log.info({
+		msg: 'shell.exec.done',
+		cwd: cwdUsed,
+		command: p.command,
+		exitCode: result.exitCode,
+		ok: result.ok,
+		timedOut,
+		truncatedStdout: outTrunc,
+		truncatedStderr: errTrunc,
+		stdoutBytes: Buffer.byteLength(stdout, 'utf8'),
+		stderrBytes: Buffer.byteLength(stderr, 'utf8'),
+		ms: durationMs,
+	});
+
+	// Non-interactive: propagate non-zero as ToolExecutionError
+	if (
+		!p.interactive &&
+		(!result.ok ||
+			typeof result.exitCode !== 'number' ||
+			result.exitCode !== 0)
+	) {
+		const msg = timedOut
+			? `timeout after ${timeoutMs}ms`
+			: `exit ${result.exitCode}${stderr ? ` — ${stderr.split('\n', 1)[0]}` : ''}`;
+		log.error({
+			msg: 'shell.exec.error',
+			cwd: cwdUsed,
+			command: p.command,
+			error: msg,
+		});
+		throw new ToolExecutionError('shell.exec', new Error(msg));
+	}
+
+	return result;
+};
+
+export function registerShellTools(reg: ToolRegistry): void {
+	reg.register(ShellExecSpec, execHandler);
+}
+
+```
+
+```text
+# src/tools/web.ts
+```
+```ts
+import {
+	type FetchUrlOptions,
+	fetchAndNormalizeUrl,
+	type UrlAttachment,
+} from '@ingest/url';
+import { childLogger } from '@obs/logger';
+import { ToolPermissionError } from '@tools/errors';
+import type { ToolRegistry } from '@tools/registry';
+import type { ToolHandler, ToolSpec } from '@tools/types';
+
+const log = childLogger({ mod: 'tools.web' });
+
+function assertHttp(url: string): void {
+	// Only allow http(s) — keep it simple & predictable
+	if (!/^https?:\/\//i.test(url)) {
+		log.warn({ msg: 'web.fetch.invalid-protocol', url });
+		throw new ToolPermissionError(
+			'web.fetch',
+			`Only http(s) URLs are allowed: ${url}`
+		);
+	}
+}
+
+function sanitizeUrl(u: string): string {
+	try {
+		const parsed = new URL(u);
+		const sensitive =
+			/^(token|key|secret|sig|signature|auth|authorization|apikey|access[_-]?token)$/i;
+		for (const [k] of parsed.searchParams) {
+			if (sensitive.test(k)) {
+				parsed.searchParams.set(k, '***');
+			}
+		}
+		return parsed.toString();
+	} catch {
+		// if it doesn't parse, return as-is (still just a string)
+		return u;
+	}
+}
+
+export const WebFetchSpec: ToolSpec = {
+	name: 'web.fetch',
+	title: 'Fetch a URL (GET)',
+	description:
+		'HTTP GET with normalization (HTML→Markdown, JSON pretty). Byte cap, timeout, and network permission gating.',
+	requiredPermissions: ['net'],
+	paramsSchema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			url: { type: 'string', format: 'uri' },
+			timeoutMs: { type: 'integer', minimum: 100, default: 10_000 },
+			maxBytes: { type: 'integer', minimum: 1024, default: 1_048_576 },
+			accept: {
+				type: 'array',
+				items: { type: 'string', minLength: 3 },
+				default: [
+					'text/plain',
+					'text/markdown',
+					'text/html',
+					'application/json',
+				],
+			},
+			userAgent: { type: 'string' },
+		},
+		required: ['url'],
+	},
+};
+
+const fetchHandler: ToolHandler = async (params, _ctx) => {
+	const t0 = Date.now();
+	const p = params as {
+		url: string;
+		timeoutMs?: number;
+		maxBytes?: number;
+		accept?: string[];
+		userAgent?: string;
+	};
+
+	// Net permission is enforced by the registry; we add a protocol check here.
+	assertHttp(p.url);
+
+	const opts: FetchUrlOptions = {
+		timeoutMs: Math.max(100, p.timeoutMs ?? 10_000),
+		maxBytes: Math.max(1024, p.maxBytes ?? 1_048_576),
+		acceptedTypes: p.accept && p.accept.length > 0 ? p.accept : undefined,
+		userAgent: p.userAgent,
+	};
+
+	log.info({
+		msg: 'web.fetch.start',
+		url: sanitizeUrl(p.url),
+		timeoutMs: opts.timeoutMs,
+		maxBytes: opts.maxBytes,
+		accept: opts.acceptedTypes,
+		hasUserAgent: Boolean(opts.userAgent),
+	});
+
+	const res: UrlAttachment = await fetchAndNormalizeUrl(p.url, opts);
+
+	log.info({
+		msg: 'web.fetch.done',
+		url: sanitizeUrl(res.url ?? p.url),
+		ok: res.ok,
+		status: res.status,
+		bytes: res.bytes,
+		truncated: res.truncated ?? false,
+		contentType: res.contentType,
+		tokenEstimate: res.tokenEstimate,
+		ms: Date.now() - t0,
+	});
+
+	// Shape the output to a stable tool result surface
+	return {
+		ok: res.ok,
+		status: res.status,
+		url: res.url,
+		bytes: res.bytes,
+		contentType: res.contentType,
+		truncated: res.truncated ?? false,
+		text: res.text,
+		title: res.title,
+		tokenEstimate: res.tokenEstimate,
+		reason: res.reason,
+		error: res.error,
+	};
+};
+
+export function registerWebTools(reg: ToolRegistry): void {
+	reg.register(WebFetchSpec, fetchHandler);
+}
+
+```
+
+```text
+# src/cli/ai.ts
+```
+```ts
+/** biome-ignore-all lint/suspicious/noConsole: tbd */
+
+import { getLogger, type LogLevel, setLogLevel } from '@obs/logger';
+import { enableTrace } from '@obs/trace';
+import { loadConfig } from '@store/config';
+import { formatBuildInfo, VERSION } from '@util/build-info';
+import { Command } from 'commander';
+import { registerAskCommand } from './commands/ask';
+import { registerBatchCommand } from './commands/batch';
+import { registerConfigureCommand } from './commands/configure';
+import { registerModelsCommand } from './commands/models';
+import { registerPromptCommand } from './commands/prompt';
+import { registerRulesCommand } from './commands/rules';
+import {
+	registerSessionsCommands,
+	registerSessionsHistorySubcommand,
+} from './commands/sessions';
+import { registerTemplatesCommand } from './commands/templates';
+
+if (typeof globalThis.Bun === 'undefined') {
+	console.error(
+		'This CLI requires the Bun runtime. Install Bun: https://bun.sh\n' +
+			'Tip (Windows): run in Git Bash or WSL, then use: curl -fsSL https://bun.sh/install | bash'
+	);
+	process.exit(1);
+}
+
+const rawArgv = process.argv.slice(2);
+const argvSansDashes = rawArgv.filter((a) => a !== '--');
+
+if (argvSansDashes.includes('--version') || argvSansDashes.includes('-v')) {
+	console.log(formatBuildInfo());
+	process.exit(0);
+}
+
+const program = new Command();
+program
+	.name('ai')
+	.description('Wraith CLI — developer assistant')
+	.version(VERSION ?? '0.0.0');
+
+program.option('-l, --log-level <level>', 'log level (debug|info|warn|error)');
+program.option('-p, --profile <name>', 'active profile name');
+program.option('-m, --model <name>', 'model id or alias');
+
+program.hook('preAction', (thisCmd) => {
+	const opts = thisCmd.opts<{
+		logLevel?: string;
+		trace?: string | boolean;
+	}>();
+	const level = (opts.logLevel ||
+		process.env.LOG_LEVEL ||
+		'info') as LogLevel;
+	setLogLevel(level);
+
+	setLogLevel(level);
+	if (opts.trace) {
+		const file = typeof opts.trace === 'string' ? opts.trace : undefined;
+		enableTrace({ filePath: file });
+	}
+});
+
+program
+	.command('hello')
+	.description('Sanity check command')
+	.action(() => {
+		const log = getLogger();
+		log.info({ msg: 'Hello from wraith-cli. Bun is working!' });
+		console.log('Try: ai --version or ai --help');
+	});
+
+program
+	.command('version')
+	.description('Show detailed version and build information')
+	.action(() => {
+		console.log(formatBuildInfo());
+	});
+
+program
+	.command('config')
+	.description('Work with configuration under .wraith')
+	.command('show')
+	.option('--json', 'Print merged config as JSON')
+	.action((opts: { json?: boolean }) => {
+		const { merged, userPath, projectPath } = loadConfig();
+		if (opts?.json) {
+			console.log(
+				JSON.stringify({ merged, userPath, projectPath }, null, 2)
+			);
+		} else {
+			console.log('User config:', userPath ?? '(none)');
+			console.log('Project config:', projectPath ?? '(none)');
+			console.log('Merged (JSON):');
+			console.log(JSON.stringify(merged, null, 2));
+		}
+	});
+
+registerConfigureCommand(program);
+registerModelsCommand(program);
+registerAskCommand(program);
+registerRulesCommand(program);
+registerPromptCommand(program);
+registerSessionsCommands(program);
+registerSessionsHistorySubcommand(program);
+registerTemplatesCommand(program);
+registerBatchCommand(program);
+
+program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);
+
+```
+
+```text
+# src/tests/unit/cli.batch.templates.test.ts
+```
+```ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@core/orchestrator', () => ({
+	runAsk: vi.fn(async ({ prompt }: { prompt: string }) => ({
+		answer: `[ANS] ${prompt}`,
+		model: 'mock',
+		timing: { startedAt: 0, elapsedMs: 0 },
+	})),
+}));
+
+// mock the template util surface (we only care about the render behavior)
+vi.mock('@util/templates', () => {
+	const meta = { name: 'greet', scope: 'project', path: '/dev/null' };
+	return {
+		resolveTemplateByName: vi.fn((name: string) =>
+			name === 'greet' ? meta : null
+		),
+		loadTemplateContent: vi.fn(() => 'ignored'),
+		renderTemplate: vi.fn((_raw: string, vars: Record<string, string>) => {
+			// produce a greeting if `name` is present
+			if (!vars.name) {
+				return { output: '', missing: ['name'] };
+			}
+			return { output: `Hello, ${vars.name}!`, missing: [] as string[] };
+		}),
+	};
+});
+
+import { handleBatchCommand } from '@cli/commands/batch';
+import { runAsk } from '@core/orchestrator';
+
+function tmpFile(name: string, content: string): string {
+	const p = path.join(os.tmpdir(), `batch-tpl-${Date.now()}-${name}`);
+	fs.writeFileSync(p, content, 'utf8');
+	return p;
+}
+
+beforeEach(() => {
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	(runAsk as any).mockClear?.();
+});
+
+describe('cli/batch with templates', () => {
+	it('renders CSV rows with a template (no prompt column required)', async () => {
+		const f = tmpFile('names.csv', 'name\nAlice\nBob\n');
+		const code = await handleBatchCommand({
+			filePath: f,
+			format: 'csv',
+			template: 'greet',
+		});
+		expect(code).toBe(0);
+		// Two answers, separated by a blank line
+		// We can’t capture stdout easily here; instead assert runAsk calls:
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const calls = (runAsk as any).mock.calls;
+		expect(calls.length).toBe(2);
+		expect(calls[0][0].prompt).toBe('Hello, Alice!');
+		expect(calls[1][0].prompt).toBe('Hello, Bob!');
+	});
+
+	it('applies --vars defaults when row lacks a variable', async () => {
+		const f = tmpFile('single.csv', 'x\n1\n');
+		const code = await handleBatchCommand({
+			filePath: f,
+			format: 'csv',
+			template: 'greet',
+			vars: { name: 'Zed' },
+		});
+		expect(code).toBe(0);
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const calls = (runAsk as any).mock.calls;
+		expect(calls.length).toBe(1);
+		expect(calls[0][0].prompt).toBe('Hello, Zed!');
+	});
+
+	it('reports missing vars as item failures and honors --fail-fast', async () => {
+		const f = tmpFile('rows.csv', 'name\n\n\n'); // 2 empty names
+		const code = await handleBatchCommand({
+			filePath: f,
+			format: 'csv',
+			template: 'greet',
+			failFast: true,
+		});
+		expect(code).toBe(1);
+		// runAsk never called due to missing var on first row
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const calls = (runAsk as any).mock.calls;
+		expect(calls.length).toBe(0);
+	});
+
+	it('works with JSONL records using template', async () => {
+		const f = tmpFile('data.jsonl', '{"name":"Neo"}\n{"name":"Trinity"}\n');
+		const code = await handleBatchCommand({
+			filePath: f,
+			format: 'jsonl',
+			template: 'greet',
+		});
+		expect(code).toBe(0);
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const calls = (runAsk as any).mock.calls;
+		expect(calls.length).toBe(2);
+		expect(calls[0][0].prompt).toBe('Hello, Neo!');
+		expect(calls[1][0].prompt).toBe('Hello, Trinity!');
+	});
+});
+
+```
+
+```text
+# src/tests/unit/cli.batch.test.ts
+```
+```ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	vi,
+} from 'vitest';
+
+// Mock the orchestrator so batch doesn't call a real provider
+vi.mock('@core/orchestrator', () => {
+	return {
+		runAsk: vi.fn(),
+	};
+});
+
+import { handleBatchCommand } from '@cli/commands/batch';
+import { runAsk } from '@core/orchestrator';
+
+function tmpFile(name: string, contents: string): string {
+	const f = path.join(os.tmpdir(), `wraith-batch-${Date.now()}-${name}`);
+	fs.writeFileSync(f, contents, 'utf8');
+	return f;
+}
+
+function captureStd(): {
+	out: string[];
+	err: string[];
+	restore: () => void;
+} {
+	const out: string[] = [];
+	const err: string[] = [];
+	const outSpy = vi
+		.spyOn(process.stdout, 'write')
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		.mockImplementation((chunk: any) => {
+			out.push(String(chunk));
+			return true;
+		});
+	const errSpy = vi
+		.spyOn(process.stderr, 'write')
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		.mockImplementation((chunk: any) => {
+			err.push(String(chunk));
+			return true;
+		});
+	return {
+		out,
+		err,
+		restore: () => {
+			outSpy.mockRestore();
+			errSpy.mockRestore();
+		},
+	};
+}
+
+describe('cli/batch', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	afterEach(() => {
+		vi.resetAllMocks();
+	});
+
+	it('processes JSONL sequentially and prints answers separated by a blank line', async () => {
+		const file = tmpFile(
+			'items.jsonl',
+			[
+				JSON.stringify({ prompt: 'First?' }),
+				JSON.stringify({ prompt: 'Second?' }),
+				'',
+			].join('\n')
+		);
+
+		(runAsk as unknown as Mock).mockImplementation(
+			(opts: { prompt: string }) => {
+				const out = opts.prompt === 'First?' ? 'ONE' : 'TWO';
+				return {
+					answer: out,
+					model: 'mock',
+					timing: { startedAt: 0, elapsedMs: 0 },
+				};
+			}
+		);
+
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file, failFast: false });
+		cap.restore();
+
+		expect(code).toBe(0);
+		const printed = cap.out.join('');
+		expect(printed).toMatch(/ONE\r?\n\r?\nTWO\r?\n$/);
+		expect((runAsk as Mock).mock.calls.length).toBe(2);
+	});
+
+	it('processes CSV with quoted values (including commas and escaped quotes)', async () => {
+		const csv = [
+			'prompt,meta',
+			'"Hello, world!","a,b,c"',
+			'"He said ""hi""","quote"',
+			'',
+		].join('\n');
+		const file = tmpFile('items.csv', csv);
+
+		(runAsk as unknown as Mock).mockImplementationOnce(() => {
+			return {
+				answer: 'A',
+				model: 'mock',
+				timing: { startedAt: 0, elapsedMs: 0 },
+			};
+		});
+		(runAsk as unknown as Mock).mockImplementationOnce(() => {
+			return {
+				answer: 'B',
+				model: 'mock',
+				timing: { startedAt: 0, elapsedMs: 0 },
+			};
+		});
+
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file });
+		cap.restore();
+
+		expect(code).toBe(0);
+		const printed = cap.out.join('');
+		expect(printed).toMatch(/A\r?\n\r?\nB\r?\n$/);
+		expect((runAsk as Mock).mock.calls.length).toBe(2);
+	});
+
+	it('errors if CSV lacks a "prompt" column', async () => {
+		const file = tmpFile('bad.csv', ['text,value', 'hello,1'].join('\n'));
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file });
+		cap.restore();
+
+		expect(code).toBe(1);
+		expect(cap.err.join('')).toMatch(/CSV must have a "prompt" column/);
+		expect((runAsk as Mock).mock.calls.length).toBe(0);
+	});
+
+	it('errors on invalid JSONL', async () => {
+		const file = tmpFile(
+			'bad.jsonl',
+			['{"prompt":"ok"}', '{bad json}'].join('\n')
+		);
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file });
+		cap.restore();
+
+		expect(code).toBe(1);
+		expect(cap.err.join('')).toMatch(/Invalid JSON on line 2/);
+		expect((runAsk as Mock).mock.calls.length).toBe(0);
+	});
+
+	it('continues after an item failure unless --fail-fast is set', async () => {
+		const file = tmpFile(
+			'items.jsonl',
+			[
+				JSON.stringify({ prompt: 'one' }),
+				JSON.stringify({ prompt: 'two' }),
+				JSON.stringify({ prompt: 'three' }),
+			].join('\n')
+		);
+
+		let call = 0;
+		(runAsk as unknown as Mock).mockImplementation(
+			(opts: { prompt: string }) => {
+				call++;
+				if (call === 2) {
+					throw new Error('boom');
+				}
+				return {
+					answer: opts.prompt.toUpperCase(),
+					model: 'mock',
+					timing: { startedAt: 0, elapsedMs: 0 },
+				};
+			}
+		);
+
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file, failFast: false });
+		cap.restore();
+
+		// Should finish all 3 with one failure => exit code 1
+		expect(code).toBe(1);
+		const out = cap.out.join('');
+		expect(out).toMatch(/ONE\r?\n/);
+		expect(out).toMatch(/THREE\r?\n/);
+		// Stderr has the failure message
+		expect(cap.err.join('')).toMatch(/Item 2 failed: boom/);
+		expect((runAsk as Mock).mock.calls.length).toBe(3);
+	});
+
+	it('stops on first failure with --fail-fast (no trailing blank separator)', async () => {
+		const file = tmpFile(
+			'items.jsonl',
+			[
+				JSON.stringify({ prompt: 'alpha' }),
+				JSON.stringify({ prompt: 'beta' }),
+			].join('\n')
+		);
+
+		(runAsk as unknown as Mock)
+			.mockImplementationOnce(() => {
+				return {
+					answer: 'OK',
+					model: 'mock',
+					timing: { startedAt: 0, elapsedMs: 0 },
+				};
+			})
+			.mockImplementationOnce(() => {
+				throw new Error('nope');
+			});
+
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file, failFast: true });
+		cap.restore();
+
+		expect(code).toBe(1);
+		const out = cap.out.join('');
+		// printed only first answer; no extra blank line added
+		expect(out).toMatch(/OK\r?\n$/);
+		expect(cap.err.join('')).toMatch(/Item 2 failed: nope/);
+		expect((runAsk as Mock).mock.calls.length).toBe(2);
+	});
+
+	it('errors on unsupported file extension', async () => {
+		const file = tmpFile('items.txt', 'anything');
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file });
+		cap.restore();
+
+		expect(code).toBe(1);
+		expect(cap.err.join('')).toMatch(/Unsupported input format/);
+		expect((runAsk as Mock).mock.calls.length).toBe(0);
+	});
+
+	it('handles empty JSONL gracefully (no output, exit 0)', async () => {
+		const file = tmpFile('empty.jsonl', '\n\n');
+		const cap = captureStd();
+		const code = await handleBatchCommand({ input: file });
+		cap.restore();
+
+		expect(code).toBe(0);
+		expect(cap.out.join('')).toBe('');
+		expect(cap.err.join('')).toBe('');
+		expect((runAsk as Mock).mock.calls.length).toBe(0);
+	});
+});
+
+```
+
+```text
+# src/tests/unit/cli.batch.concurrent.test.ts
+```
+```ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	vi,
+} from 'vitest';
+
+vi.useFakeTimers();
+
+vi.mock('@core/orchestrator', () => {
+	return {
+		runAsk: vi.fn(),
+	};
+});
+
+// NOTE: other tests import this module via @cli/*, not @/*
+import { handleBatchCommand } from '@cli/commands/batch';
+import { runAsk } from '@core/orchestrator';
+
+function tmpFile(name: string, content: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wraith-batch-'));
+	const p = path.join(dir, name);
+	fs.writeFileSync(p, content, 'utf8');
+	return p;
+}
+
+describe('cli/batch concurrency & retry', () => {
+	const outSpy = vi
+		.spyOn(process.stdout, 'write')
+		.mockImplementation(() => true);
+	const errSpy = vi
+		.spyOn(process.stderr, 'write')
+		.mockImplementation(() => true);
+
+	beforeEach(() => {
+		outSpy.mockClear();
+		errSpy.mockClear();
+		(runAsk as Mock).mockReset();
+	});
+
+	afterEach(() => {
+		vi.clearAllTimers();
+	});
+
+	it('runs with concurrency>1 but prints answers in input order', async () => {
+		const jsonl = `{"prompt":"A"}\n{"prompt":"B"}\n{"prompt":"C"}\n`;
+		const file = tmpFile('in.jsonl', jsonl);
+
+		(runAsk as Mock)
+			.mockImplementationOnce(async () => {
+				await vi.advanceTimersByTimeAsync(30);
+				return { answer: 'A' };
+			})
+			.mockImplementationOnce(async () => {
+				await vi.advanceTimersByTimeAsync(10);
+				return { answer: 'B' };
+			})
+			.mockImplementationOnce(async () => {
+				await vi.advanceTimersByTimeAsync(5);
+				return { answer: 'C' };
+			});
+
+		const p = handleBatchCommand({
+			file,
+			format: 'jsonl',
+			concurrency: 2,
+			retries: 0,
+		});
+
+		await vi.runAllTimersAsync();
+		await p;
+
+		const out = outSpy.mock.calls.map((c) => String(c[0])).join('');
+		expect(out).toMatch(/^A\r?\n\r?\nB\r?\n\r?\nC\r?\n$/);
+		expect(errSpy.mock.calls.length).toBe(0);
+		expect((runAsk as Mock).mock.calls.length).toBe(3);
+	});
+
+	it('retries on rate limit once then succeeds', async () => {
+		const jsonl = `{"prompt":"Hello"}\n`;
+		const file = tmpFile('one.jsonl', jsonl);
+
+		(runAsk as Mock)
+			.mockImplementationOnce(() => {
+				// biome-ignore lint/suspicious/noExplicitAny: tbd
+				const e: any = new Error('Too many requests');
+				e.status = 429;
+				e.code = 'rate_limit';
+				throw e;
+			})
+			.mockImplementationOnce(() => {
+				return { answer: 'OK' };
+			});
+
+		const p = handleBatchCommand({
+			file,
+			format: 'jsonl',
+			retries: 1,
+			backoffMs: 100,
+		});
+
+		await vi.advanceTimersByTimeAsync(100);
+		await p;
+
+		const out = outSpy.mock.calls.map((c) => String(c[0])).join('');
+		expect(out).toMatch(/^OK\r?\n$/);
+		expect(errSpy.mock.calls.length).toBe(0);
+		expect((runAsk as Mock).mock.calls.length).toBe(2);
+	});
+
+	it('rate limits with rps=1 even if concurrency=3 (sanity: runs and prints twice)', async () => {
+		const jsonl = `{"prompt":"P1"}\n{"prompt":"P2"}\n`;
+		const file = tmpFile('twice.jsonl', jsonl);
+
+		(runAsk as Mock).mockResolvedValue({ answer: 'X' });
+
+		const p = handleBatchCommand({
+			file,
+			format: 'jsonl',
+			concurrency: 3,
+			rps: 1,
+		});
+
+		await vi.runAllTimersAsync();
+		await p;
+
+		const out = outSpy.mock.calls.map((c) => String(c[0])).join('');
+		expect(out).toMatch(/^X\r?\n\r?\nX\r?\n$/);
+	});
+});
+
+```
+
+```text
+# src/tests/unit/cli.ask.flags.test.ts
+```
+```ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+// SUT
+import {
+	formatAskJsonErr,
+	formatAskJsonOk,
+	handleAskCommand,
+} from '@cli/commands/ask';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	vi,
+} from 'vitest';
+
+// Mocks
+vi.mock('@core/orchestrator', () => {
+	return {
+		runAsk: vi.fn(),
+	};
+});
+vi.mock('@core/structured', () => {
+	return {
+		runAskStructured: vi.fn(),
+	};
+});
+
+const { runAsk } = await import('@core/orchestrator');
+const { runAskStructured } = await import('@core/structured');
+
+function spyStdout() {
+	const spy = vi
+		.spyOn(process.stdout, 'write')
+		.mockImplementation(() => true);
+	return spy;
+}
+function spyStderr() {
+	const spy = vi
+		.spyOn(process.stderr, 'write')
+		.mockImplementation(() => true);
+	return spy;
+}
+
+beforeEach(() => {
+	vi.clearAllMocks();
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+describe('ask CLI – helpers', () => {
+	it('formatAskJsonOk / formatAskJsonErr shape', () => {
+		const ok = formatAskJsonOk({
+			answer: 'Hello',
+			model: 'test-model',
+			timing: { startedAt: 123, elapsedMs: 5 },
+		});
+		expect(ok.ok).toBe(true);
+		expect(ok.answer).toBe('Hello');
+		expect(ok.model).toBe('test-model');
+
+		const startedAt = Date.now() - 1;
+		const errOut = formatAskJsonErr(new Error('boom'), startedAt);
+		expect(errOut.ok).toBe(false);
+		expect(errOut.error.message).toContain('boom');
+		expect(errOut.timing.startedAt).toBeTypeOf('number');
+	});
+});
+
+describe('ask CLI – non-structured', () => {
+	it('streams only in markdown mode; non-markdown renders once (no streaming)', async () => {
+		(runAsk as unknown as Mock).mockImplementation(
+			async (_opts: unknown, _deps: unknown) => {
+				// If streaming were enabled we'd get an onDelta here.
+				// For 'plain' render it must be disabled.
+				return await Promise.resolve({
+					answer: 'Hi there',
+					model: 'm',
+					timing: { startedAt: 1, elapsedMs: 1 },
+				});
+			}
+		);
+
+		const out = spyStdout();
+		const err = spyStderr();
+
+		const code = await handleAskCommand({
+			prompt: 'hello',
+			render: 'plain', // disables streaming path
+			stream: true, // ignored by render != markdown
+		});
+		expect(code).toBe(0);
+
+		const printed = out.mock.calls.map((c) => String(c[0])).join('');
+		expect(printed).toContain('Hi there');
+		// exactly one final print (plus newline)
+		expect(printed.endsWith('\n')).toBe(true);
+
+		// no meta by default
+		const errPrinted = err.mock.calls.map((c) => String(c[0])).join('');
+		expect(errPrinted).not.toContain('[meta]');
+	});
+
+	it('markdown mode streams with onDelta', async () => {
+		(runAsk as unknown as Mock).mockImplementation(
+			async (_opts: unknown, deps: { onDelta?: (s: string) => void }) => {
+				// Simulate streaming
+				deps.onDelta?.('A');
+				deps.onDelta?.('B');
+				return await Promise.resolve({
+					answer: 'AB',
+					model: 'm',
+					timing: { startedAt: 1, elapsedMs: 1 },
+				});
+			}
+		);
+
+		const out = spyStdout();
+
+		const code = await handleAskCommand({
+			prompt: 'stream it',
+			render: 'markdown',
+			stream: true,
+		});
+		expect(code).toBe(0);
+
+		const printed = out.mock.calls.map((c) => String(c[0])).join('');
+		// Stream body + trailing newline we add
+		expect(printed).toBe('AB\n');
+	});
+
+	it('prints meta when --meta is set (non-JSON path)', async () => {
+		(runAsk as unknown as Mock).mockResolvedValue({
+			answer: 'ok',
+			model: 'm-1',
+			timing: { startedAt: 1, elapsedMs: 42 },
+		});
+
+		const err = spyStderr();
+
+		const code = await handleAskCommand({
+			prompt: 'x',
+			render: 'plain',
+			meta: true,
+		});
+		expect(code).toBe(0);
+
+		const meta = err.mock.calls.map((c) => String(c[0])).join('');
+		expect(meta).toContain('[meta]');
+		expect(meta).toContain('model=m-1');
+		expect(meta).toMatch(/elapsed=\d+ms/);
+	});
+
+	it('supports --file prompt source', async () => {
+		// Prepare a temp file
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ask-file-'));
+		const promptPath = path.join(dir, 'p.txt');
+		fs.writeFileSync(promptPath, 'From file', 'utf8');
+
+		let receivedPrompt = '';
+		(runAsk as unknown as Mock).mockImplementation(
+			async (opts: { prompt: string }) => {
+				receivedPrompt = opts.prompt;
+				return await Promise.resolve({
+					answer: 'ok',
+					model: 'm',
+					timing: { startedAt: 1, elapsedMs: 1 },
+				});
+			}
+		);
+
+		const code = await handleAskCommand({
+			prompt: 'ignored',
+			filePath: promptPath,
+			render: 'plain',
+		});
+		expect(code).toBe(0);
+		expect(receivedPrompt).toBe('From file');
+	});
+});
+
+describe('ask CLI – structured JSON mode', () => {
+	it('passes attempts; repair maps to attempts=3', async () => {
+		(runAskStructured as unknown as Mock).mockResolvedValue({
+			ok: true,
+			data: { x: 1 },
+			text: '{}',
+			timing: { startedAt: 1, elapsedMs: 2 },
+		});
+
+		const out = spyStdout();
+
+		// Attempt override (4)
+		await handleAskCommand({
+			prompt: 'shape this',
+			output: 'json',
+			schemaPath: path.join(__dirname, 'schema.json'),
+			attempts: 4,
+		});
+		expect((runAskStructured as Mock).mock.calls[0][0].maxAttempts).toBe(4);
+
+		// Repair shorthand (≈3)
+		await handleAskCommand({
+			prompt: 'shape this',
+			output: 'json',
+			schemaPath: path.join(__dirname, 'schema.json'),
+			repair: true,
+		});
+		expect((runAskStructured as Mock).mock.calls[1][0].maxAttempts).toBe(3);
+
+		// Success prints validated JSON each time; assert the LAST line
+		const lines = out.mock.calls
+			.map((c) => String(c[0]).trim())
+			.filter(Boolean);
+		expect(lines.at(-1)).toBe('{"x":1}');
+	});
+
+	it('on structured validation failure returns error envelope', async () => {
+		(runAskStructured as unknown as Mock).mockResolvedValue({
+			ok: false,
+			errors: [{ message: 'bad', path: '/a' }],
+			text: 'raw',
+			timing: { startedAt: 1, elapsedMs: 2 },
+		});
+
+		const out = spyStdout();
+
+		const code = await handleAskCommand({
+			prompt: 'shape this',
+			output: 'json',
+			schemaPath: path.join(__dirname, 'schema.json'),
+		});
+		expect(code).toBe(1);
+		const printed = out.mock.calls.map((c) => String(c[0])).join('');
+		const obj = JSON.parse(printed) as {
+			ok: boolean;
+			error: { message: string; errors: unknown[] };
+			text: string;
+		};
+		expect(obj.ok).toBe(false);
+		expect(obj.error.message).toContain('Schema validation failed');
+		expect(obj.text).toBe('raw');
+	});
+});
+
+```
+
+```text
+# src/tests/unit/cli.ask.json.test.ts
+```
+```ts
+import { formatAskJsonErr, formatAskJsonOk } from '@cli/commands/ask';
+import type { AskResult } from '@core/orchestrator';
+import { ProviderError } from '@provider/types';
+import { describe, expect, it } from 'vitest';
+
+describe('ask --json formatting', () => {
+	it('formats success JSON with ok=true', () => {
+		const fake: AskResult = {
+			answer: 'Hello!',
+			model: 'gpt-4o-mini',
+			usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
+			timing: { startedAt: 1000, elapsedMs: 25 },
+		};
+		const out = formatAskJsonOk(fake);
+		expect(out.ok).toBe(true);
+		expect(out.answer).toBe('Hello!');
+		expect(out.model).toBe('gpt-4o-mini');
+		expect(out.usage?.totalTokens).toBe(13);
+		expect(out.timing.elapsedMs).toBe(25);
+	});
+
+	it('formats error JSON with provider metadata', () => {
+		const startedAt = Date.now() - 5;
+		const err = new ProviderError('E_AUTH', 'Missing key', { status: 401 });
+		const out = formatAskJsonErr(err, startedAt);
+		expect(out.ok).toBe(false);
+		expect(out.error?.code).toBe('E_AUTH');
+		expect(out.error?.status).toBe(401);
+		expect(out.error?.message).toMatch(/Missing key/);
+		expect(out.timing.elapsedMs).toBeGreaterThanOrEqual(0);
+	});
+});
+
+```

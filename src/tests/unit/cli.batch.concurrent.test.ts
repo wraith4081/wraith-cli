@@ -82,6 +82,7 @@ describe('cli/batch concurrency & retry', () => {
 		expect((runAsk as Mock).mock.calls.length).toBe(3);
 	});
 
+	// TODO: fix the issue
 	it('retries on rate limit once then succeeds', async () => {
 		const jsonl = `{"prompt":"Hello"}\n`;
 		const file = tmpFile('one.jsonl', jsonl);

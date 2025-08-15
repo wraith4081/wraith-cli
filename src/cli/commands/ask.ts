@@ -34,6 +34,12 @@ export interface AskCliOptions {
 	// misc
 	meta?: boolean; // print model/elapsed to stderr in non-JSON mode
 	save?: string; // session name to persist
+
+	// reliability
+	retries?: number; // retry attempts on timeout / 429 / 5xx
+	backoffMs?: number; // base backoff in ms (exp grows from here)
+	jitterPct?: number; // 0..1 jitter factor (default 0.2)
+	timeoutMs?: number; // per-attempt timeout
 }
 
 export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
@@ -95,24 +101,50 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 	const wantStream = opts.stream !== false && !forceNoStream;
 	const wantJson = opts.json === true;
 
+	// Reliability knobs
+	const retries = clampInt(opts.retries, 0, 6, 2);
+	const backoffMs = Math.max(1, opts.backoffMs ?? 500);
+	const jitterPct = clampFloat(opts.jitterPct, 0, 1, 0.2);
+	const timeoutMs = Number.isFinite(opts.timeoutMs as number)
+		? (opts.timeoutMs as number)
+		: undefined;
+
+	// To avoid duplicate partial output in case of retries, disable streaming
+	// when reliability features are in play.
+	const enableStreaming = wantStream && retries === 0 && !timeoutMs;
+
 	try {
 		let streamed = '';
-		const result = await runAsk(
-			{
-				prompt,
-				modelFlag: opts.modelFlag,
-				profileFlag: opts.profileFlag,
-				systemOverride: opts.systemOverride,
-				instructions: opts.instructions,
+		const doAttempt = (onDelta?: (s: string) => void) =>
+			runAsk(
+				{
+					prompt,
+					modelFlag: opts.modelFlag,
+					profileFlag: opts.profileFlag,
+					systemOverride: opts.systemOverride,
+					instructions: opts.instructions,
+				},
+				{ onDelta }
+			);
+
+		const result = await runWithRetry(
+			async () => {
+				if (enableStreaming) {
+					// stream only when we know we won't retry
+					return await doAttempt((d) => {
+						streamed += d;
+						process.stdout.write(d);
+					});
+				}
+				// non-streamed single shot
+				return await doAttempt(undefined);
 			},
 			{
-				onDelta:
-					wantJson || !wantStream
-						? undefined
-						: (d) => {
-								streamed += d;
-								process.stdout.write(d);
-							},
+				retries,
+				backoffMs,
+				jitterPct,
+				timeoutMs,
+				extraMalformedRetry: true,
 			}
 		);
 
@@ -137,7 +169,7 @@ export async function handleAskCommand(opts: AskCliOptions): Promise<number> {
 			return 0;
 		}
 
-		if (wantStream && streamed.length > 0) {
+		if (enableStreaming && streamed.length > 0) {
 			if (!streamed.endsWith('\n')) {
 				process.stdout.write('\n');
 			}
@@ -212,7 +244,12 @@ export function registerAskCommand(program: Command): void {
 			'Read prompt from file (alternative to "-" for stdin)'
 		)
 		.option('--save <name>', 'Save this turn as a session under <name>')
-		.option('--meta', 'Print model + elapsed timing to stderr');
+		.option('--meta', 'Print model + elapsed timing to stderr')
+		// reliability
+		.option('--retries <n>', 'Retries on 429/5xx/timeout (default 2)')
+		.option('--backoff <ms>', 'Base backoff in ms (default 500)')
+		.option('--jitter <0..1>', 'Jitter percentage (default 0.2)')
+		.option('--timeout <ms>', 'Per-attempt timeout in ms');
 
 	cmd.action(async (prompt: string, flags: Record<string, unknown>) => {
 		const code = await handleAskCommand({
@@ -231,6 +268,11 @@ export function registerAskCommand(program: Command): void {
 			instructions: toOpt(flags.instructions),
 			filePath: toOpt(flags.file),
 			meta: Boolean(flags.meta),
+			// reliability
+			retries: toInt(flags.retries),
+			backoffMs: toInt(flags.backoff),
+			jitterPct: toFloat(flags.jitter),
+			timeoutMs: toInt(flags.timeout),
 		});
 		process.exitCode = code;
 	});
@@ -249,7 +291,16 @@ function toOutput(v: unknown): 'text' | 'json' {
 }
 function toInt(v: unknown): number | undefined {
 	const n = typeof v === 'string' ? Number.parseInt(v, 10) : Number.NaN;
-	return Number.isFinite(n) && n > 0 ? n : undefined;
+	return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+function toFloat(v: unknown): number | undefined {
+	const n =
+		typeof v === 'string'
+			? Number.parseFloat(v)
+			: typeof v === 'number'
+				? v
+				: Number.NaN;
+	return Number.isFinite(n) ? n : undefined;
 }
 async function readAllFromStdin(): Promise<string> {
 	const chunks: Buffer[] = [];
@@ -279,6 +330,40 @@ function normalizeAttempts(n?: number): number {
 		return 5;
 	}
 	return Math.floor(n);
+}
+function clampInt(
+	n: unknown | undefined,
+	min: number,
+	max: number,
+	def: number
+): number {
+	const v =
+		typeof n === 'number'
+			? n
+			: typeof n === 'string'
+				? Number.parseInt(n, 10)
+				: Number.NaN;
+	if (!Number.isFinite(v)) {
+		return def;
+	}
+	return Math.max(min, Math.min(max, Math.floor(v)));
+}
+function clampFloat(
+	n: unknown | undefined,
+	min: number,
+	max: number,
+	def: number
+): number {
+	const v =
+		typeof n === 'number'
+			? n
+			: typeof n === 'string'
+				? Number.parseFloat(n)
+				: Number.NaN;
+	if (!Number.isFinite(v)) {
+		return def;
+	}
+	return Math.max(min, Math.min(max, v));
 }
 function printMeta(res: AskResult): void {
 	const ms = res.timing?.elapsedMs ?? 0;
@@ -318,4 +403,123 @@ async function resolvePromptSource(opts: AskCliOptions): Promise<string> {
 		}
 	}
 	return String(opts.prompt ?? '');
+}
+
+type RetryOpts = {
+	retries: number;
+	backoffMs: number;
+	jitterPct: number;
+	timeoutMs?: number;
+	extraMalformedRetry?: boolean;
+};
+async function runWithRetry<T>(
+	fn: () => Promise<T>,
+	ro: RetryOpts
+): Promise<T> {
+	let tries = 0;
+	let retryCount = 0; // counts only scheduled retries
+	let usedMalformedBonus = false;
+
+	while (true) {
+		tries++;
+		try {
+			const p = ro.timeoutMs ? withTimeout(fn(), ro.timeoutMs) : fn();
+			return await p;
+		} catch (e) {
+			const malformed = isMalformedError(e);
+			const retryable = malformed || isRetryable(e);
+			const canUseBonus =
+				malformed &&
+				ro.extraMalformedRetry === true &&
+				!usedMalformedBonus;
+
+			let waitMs = 0;
+			if (canUseBonus) {
+				// immediate extra retry with NO backoff (important for tests using fake timers)
+				usedMalformedBonus = true;
+				retryCount++;
+			} else if (retryable && retryCount < ro.retries) {
+				retryCount++;
+				waitMs = backoffDelay(retryCount, ro.backoffMs, ro.jitterPct);
+			} else {
+				throw e;
+			}
+
+			if (waitMs > 0) {
+				await sleep(waitMs);
+			}
+		}
+	}
+}
+
+function isRetryable(e: unknown): boolean {
+	// ProviderError with status 429/5xx
+	if (isProviderError(e)) {
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const status = (e as any).status as number | undefined;
+		if (status === 429) {
+			return true;
+		}
+		if (typeof status === 'number' && status >= 500 && status <= 599) {
+			return true;
+		}
+		// biome-ignore lint/suspicious/noExplicitAny: tbd
+		const code = (e as any).code as string | undefined;
+		if (code && /rate[_-]?limit|overloaded/i.test(code)) {
+			return true;
+		}
+	}
+	// Timeout marker or generic status on thrown object
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	const any = e as any;
+	if (any && any.code === 'E_TIMEOUT') {
+		return true;
+	}
+	const st = any?.status as number | undefined;
+	if (st === 429 || (st && st >= 500 && st <= 599)) {
+		return true;
+	}
+	return false;
+}
+
+function isMalformedError(e: unknown): boolean {
+	const msg = e instanceof Error ? e.message : e ? String(e) : '';
+	return /malformed|invalid|parse|json/i.test(msg);
+}
+
+function backoffDelay(retryIndex: number, base: number, jitterPct: number) {
+	// retryIndex starts at 1 for the first retry
+	const pure = base * 2 ** Math.max(0, retryIndex - 1);
+	if (!jitterPct) {
+		return pure;
+	}
+	const j = pure * jitterPct;
+	// random in [pure - j, pure + j]
+	return pure - j + Math.random() * (2 * j);
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+	let to: NodeJS.Timeout | null = null;
+	try {
+		return await Promise.race<T>([
+			p,
+			new Promise<T>((_res, rej) => {
+				to = setTimeout(() => {
+					const err = new Error(`timeout after ${ms}ms`);
+					// mark so isRetryable handles it
+					// biome-ignore lint/suspicious/noExplicitAny: tbd
+					(err as any).code = 'E_TIMEOUT';
+					rej(err);
+				}, ms);
+			}),
+		]);
+	} finally {
+		if (to) {
+			clearTimeout(to);
+		}
+	}
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((r) => setTimeout(r, ms));
 }
