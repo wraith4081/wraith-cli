@@ -74,11 +74,10 @@ export function parseCsv(
 	sep = ',',
 	requirePrompt = true
 ): (BatchInputItem | Plain)[] {
-	const rows = s
-		.split(/\r?\n/)
-		.map((l) => l.trimEnd())
-		.filter((l) => l.length > 0);
-
+	const rows = s.split(/\r?\n/).map((l) => l.trimEnd());
+	if (rows.length > 0 && rows.at(-1) === '') {
+		rows.pop();
+	}
 	if (rows.length === 0) {
 		return [];
 	}

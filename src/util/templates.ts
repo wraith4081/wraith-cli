@@ -13,7 +13,7 @@ export type TemplateMeta = {
 	variables: string[]; // placeholders detected in content (e.g., {{name}} or ${name})
 };
 
-const EXTS = new Set(['.md', '.txt', '.tmpl']);
+const EXTS = new Set(['.md', '.txt', '.tmpl', '.template', '.mdx']);
 
 function templatesRoot(scope: TemplateScope): string {
 	// IMPORTANT: pass process.cwd() so tests that chdir() work correctly.
@@ -90,32 +90,53 @@ function detectVariables(s: string): string[] {
 	}
 	return [...set].sort();
 }
-
 function listIn(scope: TemplateScope): TemplateMeta[] {
-	const root = templatesRoot(scope);
-	if (!fs.existsSync(root)) {
-		return [];
-	}
-	const entries = fs
-		.readdirSync(root)
-		.filter((f) => isTemplateFile(f))
-		.map((f) => path.join(root, f));
+	const roots: string[] =
+		scope === 'project'
+			? [
+					path.join(getProjectWraithDir(process.cwd()), 'templates'),
+					path.join(process.cwd(), 'templates'),
+				]
+			: [
+					path.join(getUserWraithDir(), 'templates'),
+					...(process.env.WRAITH_TEMPLATES_DIR
+						? [path.resolve(process.env.WRAITH_TEMPLATES_DIR)]
+						: []),
+				];
 
+	const seen = new Set<string>();
 	const out: TemplateMeta[] = [];
-	for (const abs of entries) {
-		const text = readFileSafe(abs);
-		if (!text) {
+
+	for (const root of roots) {
+		if (!(root && fs.existsSync(root))) {
 			continue;
 		}
-		const { fm, body } = parseFrontMatter(text);
-		const name = path.basename(abs, path.extname(abs));
-		out.push({
-			name,
-			scope,
-			path: abs,
-			description: extractDescription(fm, body),
-			variables: detectVariables(body),
-		});
+		const files = fs
+			.readdirSync(root)
+			.filter((f) => isTemplateFile(f))
+			.map((f) => path.join(root, f));
+
+		for (const abs of files) {
+			const name = path.basename(abs, path.extname(abs));
+			const key = `${scope}:${name}`;
+			if (seen.has(key)) {
+				continue;
+			}
+
+			const text = readFileSafe(abs);
+			if (!text) {
+				continue;
+			}
+			const { fm, body } = parseFrontMatter(text);
+			out.push({
+				name,
+				scope,
+				path: abs,
+				description: extractDescription(fm, body),
+				variables: detectVariables(body),
+			});
+			seen.add(key);
+		}
 	}
 	return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -140,7 +161,11 @@ export function resolveTemplateByName(name: string): TemplateMeta | undefined {
 
 export function loadTemplateContent(meta: TemplateMeta): string {
 	const s = readFileSafe(meta.path);
-	return s ?? '';
+	if (!s) {
+		return '';
+	}
+	const { body } = parseFrontMatter(s);
+	return body;
 }
 
 /** Render with simple replacement ({{var}} and ${var}). Returns missing variables if any. */
@@ -148,9 +173,12 @@ export function renderTemplate(
 	content: string,
 	vars: Record<string, string>
 ): { output: string; missing: string[] } {
-	const needed = detectVariables(content);
-	const provided = new Set(Object.keys(vars));
-	const missing = needed.filter((k) => !provided.has(k));
+	const { body } = parseFrontMatter(content);
+	const needed = detectVariables(body);
+	const missing = needed.filter((k) => {
+		const v = vars[k];
+		return v == null || String(v).trim() === '';
+	});
 
 	const replaceOne = (s: string, key: string, val: string) =>
 		s
@@ -163,7 +191,7 @@ export function renderTemplate(
 				val
 			);
 
-	let out = content;
+	let out = body;
 	for (const [k, v] of Object.entries(vars)) {
 		out = replaceOne(out, k, v);
 	}

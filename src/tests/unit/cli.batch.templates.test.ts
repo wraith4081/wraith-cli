@@ -12,7 +12,7 @@ vi.mock('@core/orchestrator', () => ({
 }));
 
 // mock the template util surface (we only care about the render behavior)
-vi.mock('@/templates/util', () => {
+vi.mock('@util/templates', () => {
 	const meta = { name: 'greet', scope: 'project', path: '/dev/null' };
 	return {
 		resolveTemplateByName: vi.fn((name: string) =>
