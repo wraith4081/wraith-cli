@@ -5,6 +5,7 @@ import { loadConfig } from '@store/config';
 import { formatBuildInfo, VERSION } from '@util/build-info';
 import { Command } from 'commander';
 import { registerAskCommand } from './commands/ask';
+import { registerBatchCommand } from './commands/batch';
 import { registerConfigureCommand } from './commands/configure';
 import { registerModelsCommand } from './commands/models';
 import { registerPromptCommand } from './commands/prompt';
@@ -92,5 +93,6 @@ registerPromptCommand(program);
 registerSessionsCommands(program);
 registerSessionsHistorySubcommand(program);
 registerTemplatesCommand(program);
+registerBatchCommand(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);
