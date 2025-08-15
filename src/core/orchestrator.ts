@@ -1,3 +1,4 @@
+import { resolveEffectiveOptions } from '@core/effective';
 import { resolveEffectiveModel } from '@models/selection';
 import { OpenAIProvider } from '@provider/openai';
 import type { ChatMessage, ChatUsage, IProvider } from '@provider/types';
@@ -75,10 +76,17 @@ export function startChatSession(
 	deps: StartChatDeps = {}
 ): ChatSession {
 	const mergedConfig = deps.config ?? loadConfig().merged;
-	const selection = resolveEffectiveModel({
+
+	const eff = resolveEffectiveOptions({
 		config: mergedConfig,
 		explicitModel: opts.modelFlag,
 		explicitProfile: opts.profileFlag,
+	});
+
+	const selection = resolveEffectiveModel({
+		config: mergedConfig,
+		explicitModel: eff.model,
+		explicitProfile: eff.profile,
 	});
 
 	const provider: IProvider = deps.provider ?? new OpenAIProvider();
@@ -95,14 +103,13 @@ export function startChatSession(
 		userSections,
 		projectSections,
 		overrideTitle: 'Session Overrides',
-		overrideContent: opts.systemOverride, // persists across the whole session
+		overrideContent: opts.systemOverride,
 	});
 
 	// Seed history
 	const history: ChatMessage[] = [{ role: 'system', content: systemPrompt }];
 
 	if (opts.instructions?.trim()) {
-		// If caller provided persistent instructions, inject as the first user turn
 		history.push({
 			role: 'user',
 			content:
@@ -129,32 +136,23 @@ export function startChatSession(
 		): Promise<ChatTurnResult> {
 			const startedAt = Date.now();
 			let acc = '';
-			let aborted = false;
 
-			// We send a *bounded* copy; the real session history remains intact.
-			const bounded = fitMessagesToContext(history, {
+			const boundedRes = fitMessagesToContext(history, {
 				modelId: selection.modelId,
-				// Defaults are safe; later we can make this configurable per model/profile.
-			}).messages;
-			const notices = fitMessagesToContext(history, {
-				modelId: selection.modelId,
-			}).notices;
+			});
+			const bounded = boundedRes.messages;
+			const notices = boundedRes.notices;
 
 			try {
 				const res = await provider.streamChat(
-					{
-						model: selection.modelId,
-						messages: bounded,
-					},
+					{ model: selection.modelId, messages: bounded },
 					(d) => {
 						if (
 							typeof d.content === 'string' &&
 							d.content.length > 0
 						) {
 							acc += d.content;
-							if (onDelta) {
-								onDelta(d.content);
-							}
+							onDelta?.(d.content);
 						}
 					},
 					signal
@@ -163,7 +161,6 @@ export function startChatSession(
 				const elapsedMs = Date.now() - startedAt;
 				const content = acc.length > 0 ? acc : (res.content ?? '');
 
-				// Persist assistant message that the user actually saw
 				history.push({ role: 'assistant', content });
 
 				return {
@@ -176,18 +173,15 @@ export function startChatSession(
 				};
 			} catch {
 				const elapsedMs = Date.now() - startedAt;
-				aborted = true;
-
 				const content = acc;
 				if (content.length > 0) {
 					history.push({ role: 'assistant', content });
 				}
-
 				return {
 					content,
 					model: selection.modelId,
 					usage: undefined,
-					aborted,
+					aborted: true,
 					notices,
 					timing: { startedAt, elapsedMs },
 				};
@@ -205,15 +199,21 @@ export async function runAsk(
 	const startedAt = Date.now();
 
 	const mergedConfig = deps.config ?? loadConfig().merged;
-	const selection = resolveEffectiveModel({
+
+	const eff = resolveEffectiveOptions({
 		config: mergedConfig,
 		explicitModel: opts.modelFlag,
 		explicitProfile: opts.profileFlag,
 	});
 
+	const selection = resolveEffectiveModel({
+		config: mergedConfig,
+		explicitModel: eff.model,
+		explicitProfile: eff.profile,
+	});
+
 	const provider: IProvider = deps.provider ?? new OpenAIProvider();
 
-	// Load rules from user/project files and build the effective system prompt
 	const { userSections, projectSections } = loadUserAndProjectRules({
 		config: mergedConfig,
 		profileName: selection.profile,
@@ -226,7 +226,7 @@ export async function runAsk(
 		userSections,
 		projectSections,
 		overrideTitle: 'Command Overrides',
-		overrideContent: opts.systemOverride, // append if provided
+		overrideContent: opts.systemOverride,
 	});
 
 	const messages: { role: 'system' | 'user'; content: string }[] = [
@@ -234,7 +234,6 @@ export async function runAsk(
 	];
 
 	if (opts.instructions?.trim()) {
-		// If caller passed instructions, keep them as a dedicated first user turn
 		messages.push({
 			role: 'user',
 			content:
@@ -246,18 +245,12 @@ export async function runAsk(
 	messages.push({ role: 'user', content: opts.prompt });
 
 	let accumulated = '';
-	const onDelta = (s: string) => {
-		accumulated += s;
-		if (deps.onDelta) {
-			deps.onDelta(s);
-		}
-	};
-	// pass messages to provider.streamChat(...)
 	const result = await provider.streamChat(
 		{ model: selection.modelId, messages },
 		(d) => {
 			if (typeof d.content === 'string' && d.content.length > 0) {
-				onDelta(d.content);
+				accumulated += d.content;
+				deps.onDelta?.(d.content);
 			}
 		},
 		deps.signal
