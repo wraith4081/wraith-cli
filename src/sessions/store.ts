@@ -127,7 +127,7 @@ export function listSessions(): Array<{
 		if (!entry.endsWith('.json')) {
 			continue;
 		}
-		const p = path.join(sessionsDir, entry);
+		const p = path.join(dir, entry);
 		try {
 			const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as SessionFileV1;
 			if (
