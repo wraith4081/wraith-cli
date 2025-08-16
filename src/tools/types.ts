@@ -29,6 +29,12 @@ export interface ToolPolicy {
 	allowPermissions?: Permission[];
 	/** Required permissions intersecting denyPermissions cause a denial. */
 	denyPermissions?: Permission[];
+	/**
+	 * What to do when a required permission is missing from allowPermissions.
+	 * - 'deny' (default): deny immediately (current behavior).
+	 * - 'prompt': ask the user via ToolContext.ask() and cache a one-time allow.
+	 */
+	onMissingPermission?: 'deny' | 'prompt';
 }
 
 export interface ToolContext {
@@ -43,6 +49,17 @@ export interface ToolContext {
 		warn?: (msg: string, meta?: unknown) => void;
 		error?: (msg: string, meta?: unknown) => void;
 	};
+	/**
+	 * Optional interactive hook used when ToolPolicy.onMissingPermission === 'prompt'.
+	 * Return true to allow once, false to deny. Implementation can be TUI/CLI/etc.
+	 */
+	ask?: (q: {
+		kind: 'confirm';
+		message: string;
+		title?: string;
+		defaultYes?: boolean;
+		context?: { tool: string; permission: Permission };
+	}) => boolean | Promise<boolean>;
 }
 
 export type ToolHandler = (

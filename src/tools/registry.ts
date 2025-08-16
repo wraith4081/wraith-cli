@@ -6,6 +6,7 @@ import {
 	ToolValidationError,
 } from '@tools/errors';
 import type {
+	Permission,
 	RegisteredTool,
 	ToolContext,
 	ToolHandler,
@@ -52,7 +53,12 @@ export class ToolRegistry {
 		return t;
 	}
 
-	private ensureAllowed(name: string, spec: ToolSpec, policy?: ToolPolicy) {
+	private async ensureAllowed(
+		name: string,
+		spec: ToolSpec,
+		ctx: ToolContext
+	) {
+		const policy: ToolPolicy | undefined = ctx.policy;
 		const deniedTools = new Set(policy?.deniedTools ?? []);
 		if (deniedTools.has(name)) {
 			throw new ToolPermissionError(
@@ -79,15 +85,54 @@ export class ToolRegistry {
 			}
 		}
 
-		if (policy?.allowPermissions) {
-			const allowPerms = new Set(policy.allowPermissions);
-			for (const p of req) {
-				if (!allowPerms.has(p)) {
-					throw new ToolPermissionError(
-						name,
-						`Permission not granted: ${p}`
-					);
+		// Permissions satisfied?
+		const allowPermsArr = policy?.allowPermissions ?? [];
+		const allowPerms = new Set<Permission>(allowPermsArr);
+
+		const missing: Permission[] = [];
+		for (const p of req) {
+			if (!allowPerms.has(p)) {
+				missing.push(p);
+			}
+		}
+		if (missing.length === 0) {
+			return; // all good
+		}
+
+		// If allowPermissions is omitted entirely, historical behavior was "allow unless denied".
+		// We already treated omitted as [] above to compute missing; only prompt when explicitly configured.
+		if (policy?.onMissingPermission !== 'prompt') {
+			// Deny on first missing to provide a precise error.
+			throw new ToolPermissionError(
+				name,
+				`Permission not granted: ${missing[0] as string}`
+			);
+		}
+
+		// Prompt path: ask once per missing permission.
+		for (const p of missing) {
+			const ok = await Promise.resolve(
+				ctx.ask?.({
+					kind: 'confirm',
+					title: 'Permission Request',
+					message: `Tool "${name}" requires permission "${p}". Allow for this run?`,
+					defaultYes: false,
+					context: { tool: name, permission: p },
+				}) ?? false
+			);
+			if (!ok) {
+				throw new ToolPermissionError(
+					name,
+					`Permission not granted: ${p}`
+				);
+			}
+			// Cache one-time allow to avoid re-prompting later in this process.
+			if (Array.isArray(ctx.policy.allowPermissions)) {
+				if (!ctx.policy.allowPermissions.includes(p)) {
+					ctx.policy.allowPermissions.push(p);
 				}
+			} else {
+				ctx.policy.allowPermissions = [p];
 			}
 		}
 	}
@@ -113,7 +158,7 @@ export class ToolRegistry {
 		ctx: ToolContext
 	): Promise<T> {
 		const reg = this.get(name);
-		this.ensureAllowed(name, reg.spec, ctx.policy);
+		await this.ensureAllowed(name, reg.spec, ctx);
 		this.validateParams(name, params);
 
 		try {

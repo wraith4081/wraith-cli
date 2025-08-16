@@ -416,12 +416,10 @@ async function runWithRetry<T>(
 	fn: () => Promise<T>,
 	ro: RetryOpts
 ): Promise<T> {
-	let tries = 0;
 	let retryCount = 0; // counts only scheduled retries
 	let usedMalformedBonus = false;
 
 	while (true) {
-		tries++;
 		try {
 			const p = ro.timeoutMs ? withTimeout(fn(), ro.timeoutMs) : fn();
 			return await p;
