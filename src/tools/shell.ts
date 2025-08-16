@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { childLogger } from '@obs/logger';
+import { childLogger, scrubSecretsFromText } from '@obs/logger';
 import { ToolExecutionError, ToolPermissionError } from '@tools/errors';
 import type { ToolRegistry } from '@tools/registry';
 import type { ToolHandler, ToolSpec } from '@tools/types';
@@ -292,8 +292,10 @@ const execHandler: ToolHandler = async (params, ctx) => {
 
 	clearTimeout(killer);
 
-	const stdout = Buffer.concat(stdoutBufs).toString('utf8');
-	const stderr = Buffer.concat(stderrBufs).toString('utf8');
+	const stdoutRaw = Buffer.concat(stdoutBufs).toString('utf8');
+	const stderrRaw = Buffer.concat(stderrBufs).toString('utf8');
+	const stdout = scrubSecretsFromText(stdoutRaw);
+	const stderr = scrubSecretsFromText(stderrRaw);
 	const durationMs = Date.now() - started;
 
 	const result = {

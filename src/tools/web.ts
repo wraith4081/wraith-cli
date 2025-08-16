@@ -114,7 +114,7 @@ const fetchHandler: ToolHandler = async (params, _ctx) => {
 	return {
 		ok: res.ok,
 		status: res.status,
-		url: res.url,
+		url: sanitizeUrl(res.url ?? p.url),
 		bytes: res.bytes,
 		contentType: res.contentType,
 		truncated: res.truncated ?? false,

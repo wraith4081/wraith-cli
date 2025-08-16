@@ -20,7 +20,9 @@ function redactDeep(value: unknown): unknown {
 				out[k] = '***';
 			} else if (
 				k.toLowerCase().includes('token') ||
-				k.toLowerCase().includes('secret')
+				k.toLowerCase().includes('secret') ||
+				k.toLowerCase().includes('apikey') ||
+				k.toLowerCase().includes('api_key')
 			) {
 				out[k] = '***';
 			} else {
@@ -30,6 +32,51 @@ function redactDeep(value: unknown): unknown {
 		return out;
 	}
 	return value;
+}
+
+/**
+ * Scrub secret-looking values from arbitrary strings (for user-visible output).
+ * - masks any env var values whose keys look secret-ish
+ * - masks common bearer/api key patterns (e.g., "sk-...")
+ */
+export function scrubSecretsFromText(s: string | undefined | null): string {
+	if (!s) {
+		return '';
+	}
+
+	let out = s;
+
+	// Mask known env values by heuristic key names
+	for (const [key, val] of Object.entries(process.env)) {
+		if (!val || typeof val !== 'string') {
+			continue;
+		}
+		const k = key.toLowerCase();
+		if (
+			k.includes('token') ||
+			k.includes('secret') ||
+			k.includes('apikey') ||
+			k.includes('api_key') ||
+			k.includes('openai')
+		) {
+			// Replace as a whole substring (avoid leaking)
+			try {
+				if (val.length >= 6) {
+					const esc = val.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+					out = out.replace(new RegExp(esc, 'g'), '***');
+				}
+			} catch {
+				/* ignore bad regex */
+			}
+		}
+	}
+
+	// Generic bearer/JWT/API key-ish patterns
+	out = out.replace(/\bBearer\s+[A-Za-z0-9._-]{10,}\b/gi, 'Bearer ***');
+	out = out.replace(/\b(sk|rk|pk)_[A-Za-z0-9]{12,}\b/g, '$1_***');
+	out = out.replace(/\bapi[_-]?key=([A-Za-z0-9._-]{6,})/gi, 'api_key=***');
+
+	return out;
 }
 
 const redactFormat = winston.format((info) => {

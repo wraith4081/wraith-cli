@@ -1,4 +1,4 @@
-import { getLogger } from '@obs/logger';
+import { getLogger, scrubSecretsFromText } from '@obs/logger';
 import { emit } from '@obs/trace';
 import OpenAI from 'openai';
 import type { Stream } from 'openai/core/streaming.mjs';
@@ -65,7 +65,9 @@ function toMessage(err: unknown): string | undefined {
 
 function mapOpenAIError(err: unknown): ProviderError {
 	const status = toStatus(err);
-	const message = toMessage(err) ?? 'OpenAI error';
+	const rawMessage = toMessage(err) ?? 'OpenAI error';
+
+	const message = scrubSecretsFromText(rawMessage);
 	const isAbort =
 		(hasProp(err, 'name') &&
 			typeof (err as { name?: unknown }).name === 'string' &&
