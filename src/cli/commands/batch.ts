@@ -245,7 +245,7 @@ export async function handleBatchCommand(opts: BatchOptions): Promise<number> {
 	// reliability knobs
 	const retries = clampInt(opts.retries, 0, 6, 2);
 	const backoffMs = Math.max(1, opts.backoffMs ?? 500);
-	const jitterPct = clampFloat(opts.jitterPct, 0, 1, 0.2);
+	const jitterPct = clampFloat(opts.jitterPct, 0, 1, 0);
 	const timeoutMs = Number.isFinite(opts.timeoutMs as number)
 		? (opts.timeoutMs as number)
 		: undefined;
