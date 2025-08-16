@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 const BASE = 'wraith-cli';
 
@@ -20,44 +20,37 @@ const ext = process.platform === 'win32' ? '.exe' : '';
 mkdirSync('dist', { recursive: true });
 
 const binName = `${BASE}-${os}-${arch}${ext}`;
-const mapName = `${BASE}-${os}-${arch}${ext}.map`;
+const outPath = join('dist', binName);
 
-const res = await Bun.build({
-	entrypoints: ['src/cli/ai.ts'],
-	outdir: 'dist',
-	naming: binName,
-	target: 'bun',
-	minify: true,
-	sourcemap: 'external',
-	splitting: false,
-	format: 'esm',
+// Build a native single-file executable using Bun's compiler
+const proc = Bun.spawnSync({
+	cmd: [
+		'bun',
+		'build',
+		'src/cli/ai.ts',
+		'--compile',
+		'--minify',
+		'--outfile',
+		outPath,
+	],
 });
 
-if (!res.success) {
-	console.error('Build failed:');
-	for (const m of res.logs) {
-		console.error(m.message);
+if (proc.exitCode !== 0) {
+	console.error('Build failed with exit code', proc.exitCode);
+	if (proc.stderr) {
+		console.error(new TextDecoder().decode(proc.stderr));
 	}
-	process.exit(1);
+	process.exit(proc.exitCode || 1);
 }
 
-const binPath = join('dist', binName);
-const mapPath = join('dist', mapName);
-
-const sha256 = async (p: string) => {
+async function sha256File(p: string) {
+	const buf = await Bun.file(p).arrayBuffer();
 	const h = createHash('sha256');
-	h.update(await Bun.file(p).text());
+	h.update(Buffer.from(buf));
 	return h.digest('hex');
-};
-
-const binSha = sha256(binPath);
-writeFileSync(`${binPath}.sha256`, `${binSha}  ${binName}\n`);
-
-try {
-	const mapSha = sha256(mapPath);
-	writeFileSync(`${mapPath}.sha256`, `${mapSha}  ${mapName}\n`);
-} catch {
-	// map might not exist (older bun); ignore
 }
 
-console.log(`Built ${binPath}`);
+const binSha = await sha256File(outPath);
+writeFileSync(`${outPath}.sha256`, `${binSha}  ${basename(outPath)}\n`);
+
+console.log(`Built ${outPath}`);

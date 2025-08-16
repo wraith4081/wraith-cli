@@ -3,7 +3,8 @@ set -euo pipefail
 
 # ---------- Config (override via env) ----------
 REPO="${REPO:-wraith4081/wraith-cli}"           # e.g. acme/wraith-cli
-BINARY_NAME="${BINARY_NAME:-wraith-cli}"     # the executable name inside release (ai / ai.exe)
+# BINARY_NAME is the installed command name (ai on Unix)
+BINARY_NAME="${BINARY_NAME:-ai}"
 VERSION="${VERSION:-latest}"         # "latest" or "vX.Y.Z"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 SKIP_SHA="${SKIP_SHA:-0}"            # set to 1 to skip checksum verification
@@ -24,8 +25,8 @@ case "$uname_m" in
 esac
 
 # Your current matrix (based on provided releases):
-# - linux: x64 only (ai-linux-x64)
-# - macOS: arm64 only (ai-macos-arm64)
+# - linux: x64 only (wraith-cli-linux-x64)
+# - macOS: arm64 only (wraith-cli-macos-arm64)
 if [[ "$OS_TAG" == "linux" && "$ARCH_TAG" != "x64" ]]; then
   echo "No prebuilt binary for Linux/$ARCH_TAG yet." >&2; exit 1
 fi
@@ -33,7 +34,9 @@ if [[ "$OS_TAG" == "macos" && "$ARCH_TAG" != "arm64" ]]; then
   echo "No prebuilt binary for macOS/$ARCH_TAG yet." >&2; exit 1
 fi
 
-ASSET="${BINARY_NAME}-${OS_TAG}-${ARCH_TAG}"
+# Release asset base name is fixed
+ASSET_BASE="wraith-cli"
+ASSET="${ASSET_BASE}-${OS_TAG}-${ARCH_TAG}"
 EXT="" # raw binary for unix
 ASSET_FILE="${ASSET}${EXT}"
 SHA_FILE="${ASSET_FILE}.sha256"

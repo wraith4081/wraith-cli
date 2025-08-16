@@ -7,7 +7,7 @@ param(
   [switch]$SkipSha
 )
 if (-not $Repo)       { $Repo       = "wraith4081/wraith-cli" }
-if (-not $BinaryName) { $BinaryName = "wraith-cli" }
+if (-not $BinaryName) { $BinaryName = "ai" }
 if (-not $Version)    { $Version    = "latest" }
 if (-not $InstallDir) { $InstallDir = "$env:LOCALAPPDATA\wraith\bin" }
 
@@ -16,7 +16,8 @@ $ErrorActionPreference = "Stop"
 # Arch: your current windows build is x64 only
 $arch = "x64"
 
-$assetFile = "$BinaryName-windows-$arch.exe"
+# Asset name in releases is always wraith-cli-windows-x64.exe
+$assetFile = "wraith-cli-windows-$arch.exe"
 $shaFile   = "$assetFile.sha256"
 $baseUrl   = if ($Version -eq "latest") { "https://github.com/$Repo/releases/latest/download" } else { "https://github.com/$Repo/releases/download/$Version" }
 $url       = "$baseUrl/$assetFile"
