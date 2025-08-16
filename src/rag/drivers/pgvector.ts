@@ -116,12 +116,19 @@ export class PgVectorDriver implements ColdIndexDriver {
 	private client?: PgClientLike;
 	private haveTable = false;
 	private dim?: number;
+	name = 'pgvector';
 
 	constructor(opts: PgVectorDriverOptions = {}) {
 		this.opts = { ...DEF, ...opts };
 		if (typeof this.opts.dim === 'number' && this.opts.dim > 0) {
 			this.dim = this.opts.dim;
 		}
+	}
+
+	async queryByVector(): Promise<
+		Array<{ score: number; chunk: ChunkEmbedding }>
+	> {
+		return await Promise.resolve([]);
 	}
 
 	async init(): Promise<void> {
@@ -154,7 +161,10 @@ export class PgVectorDriver implements ColdIndexDriver {
 		}
 	}
 
-	async upsert(chunks: ChunkEmbedding[]): Promise<number> {
+	async upsert(items: ChunkEmbedding[]): Promise<void>;
+	async upsert(chunks: ChunkEmbedding[]): Promise<number>;
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	async upsert(chunks: ChunkEmbedding[]): Promise<any> {
 		if (!chunks.length) {
 			return 0;
 		}
@@ -274,8 +284,12 @@ export class PgVectorDriver implements ColdIndexDriver {
 			);
 			const dim = Number(r.dim ?? vec.length ?? 0);
 			const tokensEstimated = Number(
-				(r as { tokensEstimated?: number; tokensestimated?: number })
-					.tokensEstimated ??
+				(
+					r as {
+						tokensEstimated?: number;
+						tokensestimated?: number;
+					}
+				).tokensEstimated ??
 					(r as { tokensestimated?: number }).tokensestimated ??
 					0
 			);
@@ -303,7 +317,7 @@ export class PgVectorDriver implements ColdIndexDriver {
 						fileType: 'text',
 					},
 				} as ChunkEmbedding,
-				source: 'pgvector',
+				source: 'pgvector' as const,
 			});
 		}
 		return out;

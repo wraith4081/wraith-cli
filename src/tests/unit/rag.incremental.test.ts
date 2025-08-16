@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { IProvider } from '@provider/types';
+import type { ChatRequest, ChatResult, IProvider } from '@provider/types';
 import { incrementalIndex } from '@rag/incremental';
 import type {
 	ChunkEmbedding,
@@ -17,9 +17,12 @@ class ProviderFake implements IProvider {
 	async listModels() {
 		return await Promise.resolve([]);
 	}
-	async streamChat() {
-		await Promise.resolve();
-		throw new Error('not used');
+	async streamChat(req: ChatRequest): Promise<ChatResult> {
+		return await Promise.resolve({
+			content: 'hello',
+			model: req.model,
+			finishReason: 'stop',
+		} as ChatResult);
 	}
 
 	async embed(texts: string[], _model?: string): Promise<number[][]> {
@@ -39,7 +42,8 @@ class ColdDriverFake implements ColdIndexDriver {
 	async init(): Promise<void> {
 		//
 	}
-	async upsert(chunks: ChunkEmbedding[]): Promise<number> {
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	async upsert(chunks: ChunkEmbedding[]): Promise<any> {
 		this.upserts.push(...chunks);
 		return await Promise.resolve(chunks.length);
 	}
@@ -53,6 +57,14 @@ class ColdDriverFake implements ColdIndexDriver {
 	async close(): Promise<void> {
 		//
 	}
+
+	async queryByVector(): Promise<
+		Array<{ score: number; chunk: ChunkEmbedding }>
+	> {
+		return await Promise.resolve([]);
+	}
+
+	name = 'cold';
 }
 
 function write(p: string, s: string) {

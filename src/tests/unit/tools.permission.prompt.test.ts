@@ -1,6 +1,6 @@
 import { ToolPermissionError } from '@tools/errors';
 import { ToolRegistry } from '@tools/registry';
-import type { Permission, ToolContext, ToolSpec } from '@tools/types';
+import type { ToolContext, ToolSpec } from '@tools/types';
 import { describe, expect, it, vi } from 'vitest';
 
 function makeCtx(
@@ -32,9 +32,7 @@ describe('permission model: onMissingPermission=prompt', () => {
 
 		reg.register(spec, handler);
 
-		const ask = vi
-			.fn<Parameters<NonNullable<ToolContext['ask']>>, boolean>()
-			.mockReturnValue(true);
+		const ask = vi.fn().mockReturnValue(true);
 
 		const ctx = makeCtx(
 			{
@@ -51,9 +49,7 @@ describe('permission model: onMissingPermission=prompt', () => {
 		expect(handler).toHaveBeenCalledTimes(1);
 		expect(ask).toHaveBeenCalledTimes(1);
 		// The registry should have cached the granted permission.
-		expect(ctx.policy.allowPermissions).toContain<'net'>(
-			'net' as Permission
-		);
+		expect(ctx.policy.allowPermissions).toContain<'net'>('net');
 
 		// Second run: should *not* prompt again.
 		const out2 = await reg.run('demo.op', {}, ctx);
@@ -71,9 +67,7 @@ describe('permission model: onMissingPermission=prompt', () => {
 		};
 		reg.register(spec, () => 'never');
 
-		const ask = vi
-			.fn<Parameters<NonNullable<ToolContext['ask']>>, boolean>()
-			.mockReturnValue(false);
+		const ask = vi.fn().mockReturnValue(false);
 
 		const ctx = makeCtx(
 			{

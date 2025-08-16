@@ -51,11 +51,18 @@ export class QdrantDriver implements ColdIndexDriver {
 	private opts: QdrantDriverOptions;
 	private client?: QdrantClientLike;
 	private haveCollection = false;
+	name = 'qdrant';
 
 	constructor(opts: QdrantDriverOptions = {}) {
 		this.opts = { ...DEFAULTS, ...opts };
 		// Touch for parity/logging; qdrant is remote
 		coldIndexDir;
+	}
+
+	async queryByVector(): Promise<
+		Array<{ score: number; chunk: ChunkEmbedding }>
+	> {
+		return await Promise.resolve([]);
 	}
 
 	async init(): Promise<void> {
@@ -77,7 +84,8 @@ export class QdrantDriver implements ColdIndexDriver {
 		}
 	}
 
-	async upsert(chunks: ChunkEmbedding[]): Promise<number> {
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	async upsert(chunks: ChunkEmbedding[]): Promise<any> {
 		if (chunks.length === 0) {
 			return 0;
 		}

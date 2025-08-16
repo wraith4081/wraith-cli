@@ -1,3 +1,4 @@
+/** biome-ignore-all lint/suspicious/noExplicitAny: tbd */
 import type { HotIndexLike } from '@rag/retrieval';
 import { retrieveSimilar } from '@rag/retrieval';
 import type {
@@ -57,7 +58,7 @@ class ColdFake implements ColdIndexDriver {
 		return await Promise.resolve();
 	}
 	// upsert/delete not used in tests
-	async upsert(): Promise<number> {
+	async upsert(): Promise<any> {
 		return await Promise.resolve(0);
 	}
 	async deleteByIds(): Promise<number> {
@@ -69,6 +70,13 @@ class ColdFake implements ColdIndexDriver {
 	async close(): Promise<void> {
 		return await Promise.resolve();
 	}
+	async queryByVector(): Promise<
+		Array<{ score: number; chunk: ChunkEmbedding }>
+	> {
+		return await Promise.resolve(this.hits.slice());
+	}
+
+	name = 'ColdFake';
 }
 
 describe('retrieveSimilar()', () => {
@@ -89,8 +97,8 @@ describe('retrieveSimilar()', () => {
 
 	it('falls back to cold when hot insufficient', async () => {
 		const hot = new HotFake([mkChunk('a', 'A.ts', 1, 5, 0.92)]);
-		const cold1 = new ColdFake([mkChunk('c1', 'C.ts', 3, 8, 0.88)]);
-		const cold2 = new ColdFake([mkChunk('c2', 'D.ts', 4, 9, 0.86)]);
+		const cold1: any = new ColdFake([mkChunk('c1', 'C.ts', 3, 8, 0.88)]);
+		const cold2: any = new ColdFake([mkChunk('c2', 'D.ts', 4, 9, 0.86)]);
 		const res = await retrieveSimilar(
 			[1, 0, 0],
 			{ hot, colds: [cold1, cold2] },
@@ -105,7 +113,7 @@ describe('retrieveSimilar()', () => {
 	it('dedupes by span and prefers hot on tie', async () => {
 		// same span appears in hot and cold with equal scores
 		const hot = new HotFake([mkChunk('hotX', 'X.ts', 2, 7, 0.9)]);
-		const cold = new ColdFake([mkChunk('coldY', 'X.ts', 2, 7, 0.9)]);
+		const cold: any = new ColdFake([mkChunk('coldY', 'X.ts', 2, 7, 0.9)]);
 		const res = await retrieveSimilar(
 			[1, 0, 0],
 			{ hot, colds: [cold] },
@@ -118,7 +126,7 @@ describe('retrieveSimilar()', () => {
 
 	it('applies scoreThreshold across sources', async () => {
 		const hot = new HotFake([mkChunk('a', 'A.ts', 1, 5, 0.95)]);
-		const cold = new ColdFake([
+		const cold: any = new ColdFake([
 			mkChunk('ok', 'C.ts', 3, 8, 0.8),
 			mkChunk('low', 'D.ts', 4, 9, 0.49),
 		]);
@@ -133,7 +141,7 @@ describe('retrieveSimilar()', () => {
 
 	it('dedupes by id when requested', async () => {
 		const hot = new HotFake([mkChunk('same', 'P.ts', 1, 2, 0.7)]);
-		const cold = new ColdFake([mkChunk('same', 'Q.ts', 10, 12, 0.9)]);
+		const cold: any = new ColdFake([mkChunk('same', 'Q.ts', 10, 12, 0.9)]);
 		const res = await retrieveSimilar(
 			[1, 0, 0],
 			{ hot, colds: [cold] },

@@ -107,18 +107,8 @@ beforeEach(() => {
 	driver = new LanceDBDriver({
 		baseDir: '/tmp/lancedb-test',
 		connectImpl: async () =>
-			fake as unknown as {
-				openTable: (name: string) => Promise<FakeTable>;
-				createEmptyTable: (
-					name: string,
-					schema: unknown,
-					opts?: unknown
-				) => Promise<FakeTable>;
-				createTable: (
-					name: string,
-					data: unknown
-				) => Promise<FakeTable>;
-			},
+			// biome-ignore lint/suspicious/noExplicitAny: tbd
+			fake as unknown as any,
 		buildArrowSchemaImpl: () => ({}),
 	});
 });

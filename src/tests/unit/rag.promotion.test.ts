@@ -45,7 +45,8 @@ class ColdFake implements ColdIndexDriver {
 		//
 	}
 
-	async upsert(): Promise<number> {
+	// biome-ignore lint/suspicious/noExplicitAny: tbd
+	async upsert(): Promise<any> {
 		return await Promise.resolve(0);
 	}
 
@@ -60,6 +61,14 @@ class ColdFake implements ColdIndexDriver {
 	async close(): Promise<void> {
 		//
 	}
+
+	async queryByVector(): Promise<
+		Array<{ score: number; chunk: ChunkEmbedding }>
+	> {
+		return await Promise.resolve([]);
+	}
+
+	name = 'cold';
 }
 
 describe('retrieveWithPromotion', () => {

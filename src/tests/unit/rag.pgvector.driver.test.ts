@@ -211,7 +211,8 @@ describe('PgVectorDriver (mocked pg)', () => {
 
 	it('creates table on first upsert and returns nearest neighbors (cosine)', async () => {
 		const driver = new PgVectorDriver({
-			connectImpl: connectImpl('cosine'),
+			// biome-ignore lint/suspicious/noExplicitAny: tbd
+			connectImpl: connectImpl('cosine') as any,
 			distance: 'cosine',
 		});
 
@@ -228,7 +229,8 @@ describe('PgVectorDriver (mocked pg)', () => {
 
 	it('respects model filter and scoreThreshold (l2)', async () => {
 		const driver = new PgVectorDriver({
-			connectImpl: connectImpl('l2'),
+			// biome-ignore lint/suspicious/noExplicitAny: tbd
+			connectImpl: connectImpl('l2') as any,
 			distance: 'l2',
 		});
 
@@ -251,7 +253,8 @@ describe('PgVectorDriver (mocked pg)', () => {
 
 	it('upsert replaces existing id and deleteByIds removes points (ip)', async () => {
 		const driver = new PgVectorDriver({
-			connectImpl: connectImpl('ip'),
+			// biome-ignore lint/suspicious/noExplicitAny: tbd
+			connectImpl: connectImpl('ip') as any,
 			distance: 'ip',
 		});
 

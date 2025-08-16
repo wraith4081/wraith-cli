@@ -71,25 +71,29 @@ export function loadUserAndProjectRules(opts: LoadRulesOptions = {}): {
 	const profile = opts.profileName;
 	const profileRules = profile && cfg?.profiles?.[profile]?.rules;
 	const userRulesPath =
-		profileRules?.userRulesPath ??
-		findFirstExistingRules(
-			path.join(
-				opts.userDir
-					? path.join(opts.userDir, '.wraith')
-					: getUserWraithDir()
-			),
-			RULE_FILENAMES
-		);
+		typeof profileRules === 'object'
+			? profileRules?.userRulesPath
+			: (profileRules ??
+				findFirstExistingRules(
+					path.join(
+						opts.userDir
+							? path.join(opts.userDir, '.wraith')
+							: getUserWraithDir()
+					),
+					RULE_FILENAMES
+				));
+
 	const projectRulesPath =
-		profileRules?.projectRulesPath ??
-		findFirstExistingRules(
-			path.join(
-				opts.projectDir
-					? path.join(opts.projectDir, '.wraith')
-					: getProjectWraithDir()
-			),
-			PROJECT_RULE_FILENAMES
-		);
+		typeof profileRules === 'object'
+			? profileRules?.projectRulesPath
+			: findFirstExistingRules(
+					path.join(
+						opts.projectDir
+							? path.join(opts.projectDir, '.wraith')
+							: getProjectWraithDir()
+					),
+					PROJECT_RULE_FILENAMES
+				);
 
 	// Read both scopes
 	const userSections = readRulesFile(userRulesPath, 'user', errors);

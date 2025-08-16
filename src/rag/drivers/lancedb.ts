@@ -60,6 +60,7 @@ export class LanceDBDriver implements ColdIndexDriver {
 	private table?: LanceTable;
 	private readonly dir: string;
 	private readonly tableName: string;
+	name = 'lancedb';
 
 	constructor(opts: LanceDBDriverOptions = {}) {
 		this.opts = opts;
@@ -82,7 +83,8 @@ export class LanceDBDriver implements ColdIndexDriver {
 		}
 	}
 
-	async upsert(chunks: ChunkEmbedding[]): Promise<number> {
+	// biome-ignore lint/suspicious/noExplicitAny: fix
+	async upsert(chunks: ChunkEmbedding[]): Promise<any> {
 		if (chunks.length === 0) {
 			return 0;
 		}
@@ -169,7 +171,11 @@ export class LanceDBDriver implements ColdIndexDriver {
 						fileType: 'text',
 					},
 				};
-				return { chunk, score };
+				return {
+					chunk,
+					score: Number(score),
+					source: 'lancedb' as const,
+				};
 			})
 			.filter((hit) =>
 				typeof opts.scoreThreshold === 'number'
@@ -197,6 +203,12 @@ export class LanceDBDriver implements ColdIndexDriver {
 
 	async close(): Promise<void> {
 		// current JS SDK doesn’t require an explicit close; keep for symmetry
+	}
+
+	async queryByVector(): Promise<
+		Array<{ score: number; chunk: ChunkEmbedding }>
+	> {
+		return await Promise.resolve([]);
 	}
 
 	private async openOrCreateTable(): Promise<LanceTable> {

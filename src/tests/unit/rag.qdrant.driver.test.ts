@@ -146,11 +146,8 @@ describe('QdrantDriver (mocked client)', () => {
 			url: 'http://fake:6333',
 			collection: 'wraith_chunks_test',
 			connectImpl: async () =>
-				new FakeClient() as unknown as {
-					collections: QdrantDriver extends Record<string, unknown>
-						? never
-						: unknown; // unused, only for shape
-				},
+				// biome-ignore lint/suspicious/noExplicitAny: tbd
+				new FakeClient() as unknown as any,
 		});
 	});
 
