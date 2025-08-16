@@ -20,4 +20,4 @@ jobs:
         # Optional/static-analysis; keep non-blocking until configured
         run: bun x ultracite lint || true
       - name: Unit tests
-        run: bun test --coverage
+        run: bun run test
