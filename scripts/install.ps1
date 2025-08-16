@@ -1,11 +1,15 @@
 #Requires -Version 5
 param(
-  [string]$Repo       = $env:REPO        ; if (-not $Repo)        { $Repo        = "wraith4081/wraith-cli" }
-, [string]$BinaryName = $env:BINARY_NAME ; if (-not $BinaryName)  { $BinaryName  = "wraith-cli" }
-, [string]$Version    = $env:VERSION     ; if (-not $Version)     { $Version     = "latest" }
-, [string]$InstallDir = $env:INSTALL_DIR ; if (-not $InstallDir)  { $InstallDir  = "$env:LOCALAPPDATA\wraith\bin" }
-, [switch]$SkipSha    = $false
+  [string]$Repo       = $env:REPO,
+  [string]$BinaryName = $env:BINARY_NAME,
+  [string]$Version    = $env:VERSION,
+  [string]$InstallDir = $env:INSTALL_DIR,
+  [switch]$SkipSha
 )
+if (-not $Repo)       { $Repo       = "wraith4081/wraith-cli" }
+if (-not $BinaryName) { $BinaryName = "wraith-cli" }
+if (-not $Version)    { $Version    = "latest" }
+if (-not $InstallDir) { $InstallDir = "$env:LOCALAPPDATA\wraith\bin" }
 
 $ErrorActionPreference = "Stop"
 
