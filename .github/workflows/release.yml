@@ -1,0 +1,36 @@
+# .github/workflows/release.yml
+name: Release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with: { bun-version: latest }
+      - run: bun install --frozen-lockfile
+      - name: Build binary
+        run: bun run build:bin
+      - name: Compute checksums
+        shell: bash
+        run: |
+          cd dist
+          for f in ai-*; do
+            if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$f" > "$f.sha256";
+            elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" > "$f.sha256";
+            elif command -v pwsh >/dev/null 2>&1; then pwsh -Command "(Get-FileHash $f -Algorithm SHA256).Hash + '  ' + '$f' | Out-File -Encoding ascii $f.sha256";
+            fi
+          done
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ai-*

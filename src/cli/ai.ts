@@ -4,6 +4,7 @@ import { getLogger, type LogLevel, setLogLevel } from '@obs/logger';
 import { enableTrace } from '@obs/trace';
 import { loadConfig } from '@store/config';
 import { formatBuildInfo, VERSION } from '@util/build-info';
+import { checkOptionalDeps } from '@util/optional-deps';
 import { Command } from 'commander';
 import { registerAskCommand } from './commands/ask';
 import { registerBatchCommand } from './commands/batch';
@@ -11,6 +12,7 @@ import { registerConfigureCommand } from './commands/configure';
 import { registerModelsCommand } from './commands/models';
 import { registerPromptCommand } from './commands/prompt';
 import { registerRulesCommand } from './commands/rules';
+import { registerSelfUpdateCommand } from './commands/self-update';
 import {
 	registerSessionsCommands,
 	registerSessionsHistorySubcommand,
@@ -54,7 +56,7 @@ program
 		'prompt'
 	);
 
-program.hook('preAction', (thisCmd) => {
+program.hook('preAction', async (thisCmd) => {
 	const opts = thisCmd.opts<{
 		logLevel?: string;
 		trace?: string | boolean;
@@ -77,6 +79,13 @@ program.hook('preAction', (thisCmd) => {
 
 	const log = getLogger();
 	log.info({ msg: 'cli.net-policy', mode: netMode });
+	// Optional dependency diagnostics — warn only, do not block
+
+	try {
+		await checkOptionalDeps();
+	} catch {
+		/* ignore */
+	}
 });
 
 program
@@ -124,5 +133,6 @@ registerSessionsHistorySubcommand(program);
 registerTemplatesCommand(program);
 registerBatchCommand(program);
 registerUsageCommand(program);
+registerSelfUpdateCommand(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);

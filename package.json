@@ -4,14 +4,16 @@
   "module": "index.ts",
   "type": "module",
   "bin": {
-    "ai": "bin/ai"
+    "ai": "dist/ai"
   },
   "scripts": {
-    "dev": "bun run bin/ai -- --help",
-    "build": "bun build ./src/cli/ai.ts --compile --outfile ai",
+    "dev": "bun run dist/ai -- --help",
     "test": "bun x vitest run",
     "test:watch": "bun x vitest",
-    "test:ui": "bun x vitest --ui"
+    "test:ui": "bun x vitest --ui",
+    "build:bin": "bun run tools/build.ts",
+    "build:bin:here": "bun build src/cli/ai.ts --compile --minify --outfile dist/ai",
+    "release:check": "node -e \"console.log(process.platform, process.arch)\""
   },
   "devDependencies": {
     "@biomejs/biome": "2.1.2",
