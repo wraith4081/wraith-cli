@@ -55,7 +55,7 @@ export class QdrantDriver implements ColdIndexDriver {
 	constructor(opts: QdrantDriverOptions = {}) {
 		this.opts = { ...DEFAULTS, ...opts };
 		// Touch for parity/logging; qdrant is remote
-		void coldIndexDir;
+		coldIndexDir;
 	}
 
 	async init(): Promise<void> {

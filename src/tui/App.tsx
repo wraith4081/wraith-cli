@@ -1,11 +1,11 @@
 import { Box, Text, useInput, useStdout } from 'ink';
 import { useSyncExternalStore } from 'react';
-import { ApprovalsPanel } from './panels/ApprovalsPanel';
-import { ChatStreamPanel } from './panels/ChatStreamPanel';
-import { ContextPanel } from './panels/ContextPanel';
-import { DiffsPanel } from './panels/DiffsPanel';
-import { RulesPanel } from './panels/RulesPanel';
-import { StatusPanel } from './panels/StatusPanel';
+import { ApprovalsPanel } from './panels/approvals-panel';
+import { ChatStreamPanel } from './panels/chat-stream-panel';
+import { ContextPanel } from './panels/context-panel';
+import { DiffsPanel } from './panels/diffs-panel';
+import { RulesPanel } from './panels/rules-panel';
+import { StatusPanel } from './panels/status-panel';
 import type { TuiStore } from './store';
 import { useTheme, useThemeController } from './theme';
 

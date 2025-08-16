@@ -1,3 +1,4 @@
+/** biome-ignore-all lint/suspicious/noControlCharactersInRegex: test */
 import { mdToAnsi, mdToPlain, renderText } from '@render/index';
 import { describe, expect, it } from 'vitest';
 

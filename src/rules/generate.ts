@@ -151,7 +151,6 @@ export async function generateProjectRules(
 					];
 
 		let accumulated = '';
-		// biome-ignore lint/nursery/noAwaitInLoop: tbd
 		const result = await deps.provider.streamChat(
 			{ model: 'gpt-5', messages },
 			(d) => {
