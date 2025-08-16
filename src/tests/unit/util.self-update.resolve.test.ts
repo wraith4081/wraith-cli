@@ -32,10 +32,10 @@ describe('util.selfupdate.resolveLatestAsset', () => {
 	});
 
 	it('picks the exact matching asset for platform/arch', async () => {
-		const name = `ai-${os}-${arch}${ext}`;
+		const name = `wraith-cli-${os}-${arch}${ext}`;
 		const assets = [
 			{
-				name: `ai-${os}-arm64${ext}`,
+				name: `wraith-cli-${os}-arm64${ext}`,
 				browser_download_url: 'https://example.com/arm64',
 			},
 			{ name, browser_download_url: 'https://example.com/match' },

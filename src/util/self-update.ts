@@ -58,7 +58,8 @@ export async function resolveLatestAsset(opts?: {
 		? json.assets
 		: [];
 	const expected =
-		opts?.assetName ?? `ai-${platformTag()}-${archTag()}${binaryExt()}`;
+		opts?.assetName ??
+		`wraith-cli-${platformTag()}-${archTag()}${binaryExt()}`;
 
 	const asset =
 		assets.find((a) => a?.name === expected) ??
