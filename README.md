@@ -1,15 +1,14 @@
 # wraith-cli
 
-To install dependencies:
-
+MacOS / Linux
 ```bash
-bun install
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wraith4081/wraith-cli/master/scripts/install.sh)"
+# or
+curl -fsSL https://raw.githubusercontent.com/wraith4081/wraith-cli/master/scripts/install.sh | bash
 ```
 
-To run:
+Windows
 
-```bash
-bun run index.ts
+```ps1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/wraith4081/wraith-cli/master/scripts/install.ps1 | iex"
 ```
-
-This project was created using `bun init` in bun v1.2.19. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.

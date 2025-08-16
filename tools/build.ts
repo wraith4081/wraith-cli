@@ -12,7 +12,7 @@ const os =
 const arch = process.arch === 'x64' ? 'x64' : process.arch;
 const ext = process.platform === 'win32' ? '.exe' : '';
 mkdirSync('dist', { recursive: true });
-const out = join('dist', `ai-${os}-${arch}${ext}`);
+const out = join('dist', `wraith-cli-${os}-${arch}${ext}`);
 const res = await Bun.build({
 	entrypoints: ['src/cli/ai.ts'],
 	outdir: 'dist',

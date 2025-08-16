@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          for f in ai-*; do
+          for f in wraith-cli-*; do
             if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$f" > "$f.sha256";
             elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" > "$f.sha256";
             elif command -v pwsh >/dev/null 2>&1; then pwsh -Command "(Get-FileHash $f -Algorithm SHA256).Hash + '  ' + '$f' | Out-File -Encoding ascii $f.sha256";
@@ -33,4 +33,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ai-*
+            dist/wraith-cli-*
