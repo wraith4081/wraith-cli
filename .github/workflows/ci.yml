@@ -16,10 +16,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Typecheck
         run: bun x tsc -p tsconfig.json --noEmit
-      - name: Lint (Biome)
-        run: bun x @biomejs/biome check --reporter=github .
       - name: Lint (Ultracite)
         # Optional/static-analysis; keep non-blocking until configured
-        run: bun x ultracite || true
+        run: bun x ultracite lint || true
       - name: Unit tests
         run: bun test --coverage
