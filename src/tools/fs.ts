@@ -61,57 +61,9 @@ function resolveInSandbox(cwd: string, rel: string): string {
 }
 
 function guardSymlinkWrites(absPath: string, op: string): void {
+	let st: fs.Stats;
 	try {
-		const st = fs.lstatSync(absPath);
-		if (st.isSymbolicLink()) {
-			// resolve and ensure still inside parent dir
-			let real: string;
-			try {
-				real = fs.realpathSync(absPath);
-			} catch (e) {
-				if (
-					typeof e === 'object' &&
-					e &&
-					'code' in e &&
-					e.code === 'ENOENT'
-				) {
-					log.warn({
-						msg: 'fs.symlink-dangling',
-						op,
-						target: toPosix(absPath),
-					});
-					throw new ToolPermissionError(
-						`fs.${op}`,
-						`Refusing to write via dangling symlink: ${toPosix(absPath)}`
-					);
-				}
-				throw e;
-			}
-			const base = fs.realpathSync(path.dirname(absPath));
-			const rel = path.relative(base, real);
-			if (rel.startsWith('..') || path.isAbsolute(rel)) {
-				log.warn({
-					msg: 'fs.symlink-outside-sandbox',
-					op,
-					target: toPosix(absPath),
-					real: toPosix(real),
-				});
-				throw new ToolPermissionError(
-					`fs.${op}`,
-					`Refusing to follow symlink outside sandbox: ${toPosix(absPath)} -> ${toPosix(real)}`
-				);
-			}
-			// more conservative: disallow writing via symlink entirely
-			log.warn({
-				msg: 'fs.symlink-write-denied',
-				op,
-				target: toPosix(absPath),
-			});
-			throw new ToolPermissionError(
-				`fs.${op}`,
-				`Refusing to write via symlink: ${toPosix(absPath)}`
-			);
-		}
+		st = fs.lstatSync(absPath);
 	} catch {
 		// path may not exist yet; check parent dir realpath
 		const parent = fs.realpathSync(path.dirname(absPath));
@@ -128,6 +80,54 @@ function guardSymlinkWrites(absPath: string, op: string): void {
 				`Parent directory escapes sandbox: ${toPosix(absPath)}`
 			);
 		}
+		return;
+	}
+
+	if (st.isSymbolicLink()) {
+		// resolve and ensure still inside parent dir
+		let real: string;
+		try {
+			real = fs.realpathSync(absPath);
+		} catch (e) {
+			// biome-ignore lint/suspicious/noExplicitAny: tbd
+			const code = (e as any)?.code;
+			if (code === 'ENOENT') {
+				log.warn({
+					msg: 'fs.symlink-dangling',
+					op,
+					target: toPosix(absPath),
+				});
+				throw new ToolPermissionError(
+					`fs.${op}`,
+					`Refusing to write via dangling symlink: ${toPosix(absPath)}`
+				);
+			}
+			throw e;
+		}
+		const base = fs.realpathSync(path.dirname(absPath));
+		const rel = path.relative(base, real);
+		if (rel.startsWith('..') || path.isAbsolute(rel)) {
+			log.warn({
+				msg: 'fs.symlink-outside-sandbox',
+				op,
+				target: toPosix(absPath),
+				real: toPosix(real),
+			});
+			throw new ToolPermissionError(
+				`fs.${op}`,
+				`Refusing to follow symlink outside sandbox: ${toPosix(absPath)} -> ${toPosix(real)}`
+			);
+		}
+		// more conservative: disallow writing via symlink entirely
+		log.warn({
+			msg: 'fs.symlink-write-denied',
+			op,
+			target: toPosix(absPath),
+		});
+		throw new ToolPermissionError(
+			`fs.${op}`,
+			`Refusing to write via symlink: ${toPosix(absPath)}`
+		);
 	}
 }
 
