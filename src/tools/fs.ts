@@ -65,7 +65,28 @@ function guardSymlinkWrites(absPath: string, op: string): void {
 		const st = fs.lstatSync(absPath);
 		if (st.isSymbolicLink()) {
 			// resolve and ensure still inside parent dir
-			const real = fs.realpathSync(absPath);
+			let real: string;
+			try {
+				real = fs.realpathSync(absPath);
+			} catch (e) {
+				if (
+					typeof e === 'object' &&
+					e &&
+					'code' in e &&
+					e.code === 'ENOENT'
+				) {
+					log.warn({
+						msg: 'fs.symlink-dangling',
+						op,
+						target: toPosix(absPath),
+					});
+					throw new ToolPermissionError(
+						`fs.${op}`,
+						`Refusing to write via dangling symlink: ${toPosix(absPath)}`
+					);
+				}
+				throw e;
+			}
 			const base = fs.realpathSync(path.dirname(absPath));
 			const rel = path.relative(base, real);
 			if (rel.startsWith('..') || path.isAbsolute(rel)) {

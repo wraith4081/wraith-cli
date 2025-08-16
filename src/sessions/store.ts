@@ -118,11 +118,12 @@ export function listSessions(): Array<{
 	updatedAt: number;
 	messages: number;
 }> {
-	if (!fs.existsSync(sessionsDir)) {
+	const dir = currentSessionsDir();
+	if (!fs.existsSync(dir)) {
 		return [];
 	}
 	const out: ReturnType<typeof listSessions> = [];
-	for (const entry of fs.readdirSync(sessionsDir)) {
+	for (const entry of fs.readdirSync(dir)) {
 		if (!entry.endsWith('.json')) {
 			continue;
 		}
@@ -155,7 +156,8 @@ export function listSessions(): Array<{
 }
 
 export function loadSession(nameOrId: string): SessionFileV1 | undefined {
-	const p = filePathFor(nameOrId);
+	const dir = currentSessionsDir();
+	const p = path.join(dir, `${nameOrId}.json`);
 	if (!fs.existsSync(p)) {
 		return;
 	}
@@ -188,10 +190,7 @@ function currentSessionsDir(): string {
 	return path.join(process.cwd(), '.wraith', 'sessions');
 }
 
-function filePathFor(nameOrId: string): string {
-	// keep this helper unused for writes; callers may still want static path
-	return path.join(sessionsDir, `${nameOrId}.json`);
-}
+
 
 function writeSession(file: SessionFileV1, nameOrId?: string): string {
 	// Ensure both dirs exist:
