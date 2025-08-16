@@ -1,3 +1,4 @@
+import { recordTool } from '@obs/metrics';
 import {
 	ToolError,
 	ToolExecutionError,
@@ -167,9 +168,35 @@ export class ToolRegistry {
 		this.validateParams(name, params);
 
 		try {
+			const t0 = Date.now();
 			const res = await reg.handler(params, ctx);
+			try {
+				recordTool(
+					{
+						name,
+						elapsedMs: Date.now() - t0,
+						ok: true,
+					},
+					ctx.cwd
+				);
+			} catch {
+				// ignore
+			}
 			return res as T;
 		} catch (e) {
+			try {
+				recordTool(
+					{
+						name,
+						elapsedMs: 0,
+						ok: false,
+						error: e instanceof Error ? e.message : String(e),
+					},
+					ctx.cwd
+				);
+			} catch {
+				// ignore
+			}
 			if (e instanceof ToolError) {
 				throw e;
 			}

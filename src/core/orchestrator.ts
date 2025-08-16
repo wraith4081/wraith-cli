@@ -1,5 +1,6 @@
 import { resolveEffectiveOptions } from '@core/effective';
 import { resolveEffectiveModel } from '@models/selection';
+import { configureAnalytics, recordAsk, recordChatTurn } from '@obs/metrics';
 import { emit } from '@obs/trace';
 import { OpenAIProvider } from '@provider/openai';
 import type { ChatMessage, ChatUsage, IProvider } from '@provider/types';
@@ -175,7 +176,19 @@ export function startChatSession(
 
 				const elapsedMs = Date.now() - startedAt;
 				const content = acc.length > 0 ? acc : (res.content ?? '');
-
+				try {
+					recordChatTurn(
+						{
+							model: selection.modelId,
+							contentChars: content.length,
+							elapsedMs,
+							aborted: false,
+						},
+						process.cwd()
+					);
+				} catch {
+					// ignore
+				}
 				history.push({ role: 'assistant', content });
 				emit({
 					t: 'chat.turn.end',
@@ -205,6 +218,19 @@ export function startChatSession(
 					elapsedMs,
 					aborted: true,
 				});
+				try {
+					recordChatTurn(
+						{
+							model: selection.modelId,
+							contentChars: content.length,
+							elapsedMs,
+							aborted: true,
+						},
+						process.cwd()
+					);
+				} catch {
+					// ignore
+				}
 				return {
 					content,
 					model: selection.modelId,
@@ -228,7 +254,14 @@ export async function runAsk(
 	const id = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
 
 	const mergedConfig = deps.config ?? loadConfig().merged;
-
+	// analytics is local-only and disabled by default
+	const analyticsEnabled =
+		(mergedConfig as { analytics?: { enabled?: boolean } })?.analytics
+			?.enabled === true;
+	configureAnalytics({
+		enabled: analyticsEnabled,
+		projectDir: process.cwd(),
+	});
 	const eff = resolveEffectiveOptions({
 		config: mergedConfig,
 		explicitModel: opts.modelFlag,
@@ -308,6 +341,24 @@ export async function runAsk(
 				}
 			: undefined,
 	});
+
+	try {
+		recordAsk(
+			{
+				model: selection.modelId,
+				promptChars: opts.prompt.length,
+				answerChars:
+					(accumulated.length > 0 ? accumulated : result.content)
+						?.length ?? 0,
+				usage: result.usage,
+				elapsedMs,
+				ok: true,
+			},
+			process.cwd()
+		);
+	} catch {
+		/* ignore */
+	}
 
 	return {
 		answer: accumulated.length > 0 ? accumulated : result.content,

@@ -16,6 +16,7 @@ import {
 	registerSessionsHistorySubcommand,
 } from './commands/sessions';
 import { registerTemplatesCommand } from './commands/templates';
+import { registerUsageCommand } from './commands/usage';
 
 if (typeof globalThis.Bun === 'undefined') {
 	console.error(
@@ -122,5 +123,6 @@ registerSessionsCommands(program);
 registerSessionsHistorySubcommand(program);
 registerTemplatesCommand(program);
 registerBatchCommand(program);
+registerUsageCommand(program);
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);
