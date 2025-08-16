@@ -24,17 +24,30 @@ export interface ToolPolicy {
 	deniedTools?: string[];
 	/**
 	 * If provided, a tool may execute only if (requiredPermissions ⊆ allowPermissions).
-	 * If omitted, all permissions are allowed unless explicitly denied.
+	 * If omitted and onMissingPermission !== 'allow', missing permissions will be handled
+	 * according to onMissingPermission (e.g., 'prompt' = ask user).
 	 */
 	allowPermissions?: Permission[];
 	/** Required permissions intersecting denyPermissions cause a denial. */
 	denyPermissions?: Permission[];
 	/**
-	 * What to do when a required permission is missing from allowPermissions.
-	 * - 'deny' (default): deny immediately (current behavior).
-	 * - 'prompt': ask the user via ToolContext.ask() and cache a one-time allow.
+	 * What to do when a tool requires a permission that is not in allowPermissions and not
+	 * explicitly denied:
+	 *  - 'prompt' => ask via ToolContext.ask(); grant if user approves
+	 *  - 'deny'   => block with ToolPermissionError
+	 *  - 'allow'  => allow implicitly (legacy permissive behavior)
+	 * Default: 'deny' (explicit is better than implicit).
 	 */
-	onMissingPermission?: 'deny' | 'prompt';
+	onMissingPermission?: 'prompt' | 'deny' | 'allow';
+}
+
+/** Prompt interface for interactive permission asks. */
+export interface PermissionPrompt {
+	type: 'permission';
+	tool: string;
+	permissions: Permission[];
+	/** Optional human-friendly reason (may be shown to the user). */
+	reason?: string;
 }
 
 export interface ToolContext {
@@ -50,16 +63,10 @@ export interface ToolContext {
 		error?: (msg: string, meta?: unknown) => void;
 	};
 	/**
-	 * Optional interactive hook used when ToolPolicy.onMissingPermission === 'prompt'.
-	 * Return true to allow once, false to deny. Implementation can be TUI/CLI/etc.
+	 * Optional interactive prompt hook used when policy.onMissingPermission === 'prompt'.
+	 * Should return true to grant (and cache) the permission, or false to deny.
 	 */
-	ask?: (q: {
-		kind: 'confirm';
-		message: string;
-		title?: string;
-		defaultYes?: boolean;
-		context?: { tool: string; permission: Permission };
-	}) => boolean | Promise<boolean>;
+	ask?: (q: PermissionPrompt) => boolean | Promise<boolean>;
 }
 
 export type ToolHandler = (

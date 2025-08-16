@@ -146,7 +146,6 @@ export async function discoverAndRegisterPlugins(
 
 	const seen = new Set<string>();
 	const loaded: LoadedPluginInfo[] = [];
-
 	async function loadTree(base: string, source: PluginSource) {
 		const dirs = listPluginDirs(base);
 		for (const dir of dirs) {
@@ -156,7 +155,6 @@ export async function discoverAndRegisterPlugins(
 					continue;
 				}
 				if (seen.has(data.name)) {
-					// a higher-precedence source already provided this plugin
 					continue;
 				}
 
@@ -172,7 +170,11 @@ export async function discoverAndRegisterPlugins(
 					const lacking = [...requested].filter(
 						(p) => !allowSet.has(p)
 					);
-					if (lacking.length > 0) {
+					if (
+						lacking.length > 0 &&
+						opts.policy?.onMissingPermission !== 'prompt'
+					) {
+						// If runtime policy allows prompting, defer enforcement to call-time.
 						throw new ToolPermissionError(
 							'plugin.load',
 							`Plugin "${data.name}" requests denied permissions: ${lacking.join(', ')}`
@@ -180,19 +182,14 @@ export async function discoverAndRegisterPlugins(
 					}
 				}
 
-				// Dynamic import
 				const mod: unknown = await import(pathToFileURL(mainAbs).href);
-
-				// Expect a "register(registry)" export
-				// biome-ignore lint/suspicious/noExplicitAny: plugin surface is untyped at runtime
+				// biome-ignore lint/suspicious/noExplicitAny: tbd
 				const register = (mod as any)?.register;
 				if (typeof register !== 'function') {
 					throw new ToolValidationError('plugin.entry', [
 						`Entry module does not export "register(registry)" in ${mainAbs}`,
 					]);
 				}
-
-				// Call into plugin to register tools
 				register(reg);
 
 				loaded.push({

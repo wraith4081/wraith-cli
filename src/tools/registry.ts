@@ -57,7 +57,7 @@ export class ToolRegistry {
 		name: string,
 		spec: ToolSpec,
 		ctx: ToolContext
-	) {
+	): Promise<void> {
 		const policy: ToolPolicy | undefined = ctx.policy;
 		const deniedTools = new Set(policy?.deniedTools ?? []);
 		if (deniedTools.has(name)) {
@@ -85,10 +85,16 @@ export class ToolRegistry {
 			}
 		}
 
-		// Permissions satisfied?
-		const allowPermsArr = policy?.allowPermissions ?? [];
-		const allowPerms = new Set<Permission>(allowPermsArr);
+		// Effective allow-list (empty if not provided)
+		const allowPerms = new Set<Permission>(policy?.allowPermissions ?? []);
 
+		// Fast path: allow all if explicitly configured so.
+		const mode = policy?.onMissingPermission ?? 'deny';
+		if (mode === 'allow') {
+			return;
+		}
+
+		// For each required permission, ensure it's granted or handle the miss.
 		const missing: Permission[] = [];
 		for (const p of req) {
 			if (!allowPerms.has(p)) {
@@ -96,45 +102,44 @@ export class ToolRegistry {
 			}
 		}
 		if (missing.length === 0) {
-			return; // all good
+			return;
 		}
 
-		// If allowPermissions is omitted entirely, historical behavior was "allow unless denied".
-		// We already treated omitted as [] above to compute missing; only prompt when explicitly configured.
-		if (policy?.onMissingPermission !== 'prompt') {
-			// Deny on first missing to provide a precise error.
+		if (mode === 'deny' || !ctx.ask) {
+			// No prompting available or explicitly denied.
+			const which = missing.join(', ');
 			throw new ToolPermissionError(
 				name,
-				`Permission not granted: ${missing[0] as string}`
+				`Permission not granted: ${which}`
 			);
 		}
 
-		// Prompt path: ask once per missing permission.
-		for (const p of missing) {
-			const ok = await Promise.resolve(
-				ctx.ask?.({
-					kind: 'confirm',
-					title: 'Permission Request',
-					message: `Tool "${name}" requires permission "${p}". Allow for this run?`,
-					defaultYes: false,
-					context: { tool: name, permission: p },
-				}) ?? false
+		// Prompt once for all missing permissions for this tool.
+		const approved = await Promise.resolve(
+			ctx.ask({
+				type: 'permission',
+				tool: name,
+				permissions: missing,
+				reason:
+					missing.length === 1
+						? `Tool requires "${missing[0]}" permission`
+						: `Tool requires permissions: ${missing.join(', ')}`,
+			})
+		);
+
+		if (!approved) {
+			throw new ToolPermissionError(
+				name,
+				`User denied permission${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}`
 			);
-			if (!ok) {
-				throw new ToolPermissionError(
-					name,
-					`Permission not granted: ${p}`
-				);
-			}
-			// Cache one-time allow to avoid re-prompting later in this process.
-			if (Array.isArray(ctx.policy.allowPermissions)) {
-				if (!ctx.policy.allowPermissions.includes(p)) {
-					ctx.policy.allowPermissions.push(p);
-				}
-			} else {
-				ctx.policy.allowPermissions = [p];
-			}
 		}
+
+		// Cache the grant by mutating the allow list in the active policy.
+		const updated = new Set<Permission>(policy?.allowPermissions ?? []);
+		for (const p of missing) {
+			updated.add(p);
+		}
+		ctx.policy.allowPermissions = [...updated];
 	}
 
 	private validateParams(name: string, params: unknown): void {
@@ -168,7 +173,6 @@ export class ToolRegistry {
 			if (e instanceof ToolError) {
 				throw e;
 			}
-
 			throw new ToolExecutionError(name, e);
 		}
 	}

@@ -39,25 +39,43 @@ program
 	.description('Wraith CLI — developer assistant')
 	.version(VERSION ?? '0.0.0');
 
-program.option('-l, --log-level <level>', 'log level (debug|info|warn|error)');
-program.option('-p, --profile <name>', 'active profile name');
-program.option('-m, --model <name>', 'model id or alias');
+program
+	.option('-l, --log-level <level>', 'log level (debug|info|warn|error)')
+	.option('-p, --profile <name>', 'active profile name')
+	.option('-m, --model <name>', 'model id or alias')
+	.option(
+		'--net <mode>',
+		'network policy (on|off|prompt)',
+		(value: string) => {
+			const v = String(value || '').toLowerCase();
+			return v === 'on' || v === 'off' || v === 'prompt' ? v : 'prompt';
+		},
+		'prompt'
+	);
 
 program.hook('preAction', (thisCmd) => {
 	const opts = thisCmd.opts<{
 		logLevel?: string;
 		trace?: string | boolean;
+		net?: 'on' | 'off' | 'prompt';
 	}>();
 	const level = (opts.logLevel ||
 		process.env.LOG_LEVEL ||
 		'info') as LogLevel;
 	setLogLevel(level);
 
-	setLogLevel(level);
 	if (opts.trace) {
 		const file = typeof opts.trace === 'string' ? opts.trace : undefined;
 		enableTrace({ filePath: file });
 	}
+
+	// Expose chosen net mode so subcommands can build a ToolPolicy accordingly.
+	// (We keep it as an env var to avoid threading state everywhere.)
+	const netMode = opts.net ?? 'prompt';
+	process.env.WRAITH_NET = netMode;
+
+	const log = getLogger();
+	log.info({ msg: 'cli.net-policy', mode: netMode });
 });
 
 program
