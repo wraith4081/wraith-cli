@@ -9,7 +9,7 @@ describe('Rules Manager', () => {
 	it('returns default system prompt when no sections/override provided', () => {
 		const prompt = buildEffectiveSystemPrompt();
 		expect(prompt).toContain(
-			'You are Wraith: a helpful developer CLI assistant.'
+			'You are an agent that specializes in working with Specs in Wraith CLI.'
 		);
 	});
 
@@ -35,7 +35,7 @@ describe('Rules Manager', () => {
 
 		// Default present
 		expect(prompt).toContain(
-			'You are Wraith: a helpful developer CLI assistant.'
+			'You are an agent that specializes in working with Specs in Wraith CLI.'
 		);
 		// User rules section
 		expect(prompt).toContain('## User Rules');

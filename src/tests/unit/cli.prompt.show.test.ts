@@ -49,7 +49,7 @@ describe('ai prompt show (computeEffectivePrompt)', () => {
 			config: { version: '1' },
 		});
 		expect(prompt).toContain(
-			'You are Wraith: a helpful developer CLI assistant.'
+			'You are an agent that specializes in working with Specs in Wraith CLI.'
 		);
 		expect(meta.userSectionCount).toBe(0);
 		expect(meta.projectSectionCount).toBe(0);
