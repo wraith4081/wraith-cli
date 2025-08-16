@@ -1,11 +1,12 @@
 {
   "name": "wraith-cli",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "module": "index.ts",
   "type": "module",
   "bin": {
     "ai": "dist/ai"
   },
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "bun run dist/ai -- --help",
     "test": "bun x vitest run",
