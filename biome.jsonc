@@ -13,7 +13,8 @@
       "style": {
         "noParameterProperties": "off",
         "noNestedTernary": "off",
-        "useConsistentMemberAccessibility": "off"
+        "useConsistentMemberAccessibility": "off",
+        "useFilenamingConvention": "off"
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": "off"

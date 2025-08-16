@@ -1,5 +1,5 @@
 import { render } from 'ink';
-import App from './app';
+import App from './App';
 import { createTuiController, type TuiController } from './controller';
 import { createTuiStore } from './store';
 import { ThemeProvider } from './theme';
