@@ -5,12 +5,14 @@ import type { TuiCitation, TuiContextItem } from '../types';
 export function ContextPanel(props: {
 	items?: TuiContextItem[];
 	citations?: TuiCitation[];
+	notices?: string[];
 	focused?: boolean;
 }) {
 	const items = props.items ?? [];
 	const cites = props.citations ?? [];
+	const notes = props.notices ?? [];
 	return (
-		<Section focused={props.focused} title="Context / Citations">
+		<Section focused={props.focused} title="Context / Citations / Notices">
 			<Box flexDirection="column">
 				<Text bold>Included</Text>
 				{items.length === 0 ? (
@@ -38,6 +40,14 @@ export function ContextPanel(props: {
 								) : null}
 							</Text>
 						))
+					)}
+				</Box>
+				<Box flexDirection="column" marginTop={1}>
+					<Text bold>Notices</Text>
+					{notes.length === 0 ? (
+						<SmallDim>none</SmallDim>
+					) : (
+						notes.map((n, idx) => <Text key={idx}>• {n}</Text>)
 					)}
 				</Box>
 			</Box>

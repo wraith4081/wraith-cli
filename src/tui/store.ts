@@ -20,6 +20,7 @@ export type TuiState = {
 	context: {
 		items: TuiContextItem[];
 		citations: TuiCitation[];
+		notices?: string[];
 	};
 	rules: TuiRuleSection[];
 	approvals: TuiApproval[];
@@ -31,12 +32,17 @@ export type TuiState = {
 		message?: string;
 		themeMode?: ThemeMode;
 		colorLevel?: ColorLevel;
+		panelsOpen?: Record<string, boolean>; // per-panel visibility (default: open)
+		chatHistory?: string[];
+		chatHistoryIndex?: number; // -1 means composing new, otherwise index into chatHistory
 	};
 	// callbacks (optional)
 	onApproveTool?: (tool: string) => void | Promise<void>;
 	onRejectTool?: (tool: string) => void | Promise<void>;
 	onOpenDiff?: (title?: string) => void | Promise<void>;
 	onNavigateHistory?: (dir: -1 | 1) => void | Promise<void>;
+	// chat
+	onSubmitChat?: (text: string) => void | Promise<void>;
 };
 
 export type TuiStore = {
@@ -56,6 +62,7 @@ export function createTuiStore(initial?: Partial<TuiState>): TuiStore {
 		context: {
 			items: initial?.context?.items ?? [],
 			citations: initial?.context?.citations ?? [],
+			notices: initial?.context?.notices ?? [],
 		},
 		rules: initial?.rules ?? [],
 		approvals: initial?.approvals ?? [],
@@ -67,11 +74,22 @@ export function createTuiStore(initial?: Partial<TuiState>): TuiStore {
 			message: undefined,
 			themeMode: 'system',
 			colorLevel: 'basic',
+			chatHistory: [],
+			chatHistoryIndex: -1,
+			panelsOpen: {
+				chat: true,
+				context: false,
+				rules: false,
+				approvals: false,
+				diffs: false,
+				status: false,
+			},
 		},
 		onApproveTool: initial?.onApproveTool,
 		onRejectTool: initial?.onRejectTool,
 		onOpenDiff: initial?.onOpenDiff,
 		onNavigateHistory: initial?.onNavigateHistory,
+		onSubmitChat: initial?.onSubmitChat,
 	};
 
 	const listeners = new Set<() => void>();

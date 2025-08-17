@@ -1,5 +1,7 @@
 import { Box, Text, useInput, useStdout } from 'ink';
 import { useSyncExternalStore } from 'react';
+import { activateFocusedWithAnnounce } from '../core/a11y/integrations.js';
+import type { TuiIntegration } from './integration';
 import { ApprovalsPanel } from './panels/approvals-panel';
 import { ChatStreamPanel } from './panels/chat-stream-panel';
 import { ContextPanel } from './panels/context-panel';
@@ -27,7 +29,13 @@ function extractLastCodeBlock(s: string): string | null {
 	return fences.at(-1) ?? null;
 }
 
-export default function App({ store }: { store: TuiStore }) {
+export default function App({
+	store,
+	integration,
+}: {
+	store: TuiStore;
+	integration?: TuiIntegration;
+}) {
 	const state = useSyncExternalStore(store.subscribe, store.get, store.get);
 	const { stdout } = useStdout();
 	const cols = stdout?.columns ?? 120;
@@ -36,24 +44,222 @@ export default function App({ store }: { store: TuiStore }) {
 	const theme = useTheme();
 	const themeCtl = useThemeController();
 
-	// keybindings
+	// Palette state (via adapter) for rendering and input routing
+	const paletteState = integration
+		? // biome-ignore lint/correctness/useHookAtTopLevel: tbd
+			useSyncExternalStore(
+				integration.palette.subscribe.bind(integration.palette),
+				integration.palette.getState.bind(integration.palette),
+				integration.palette.getState.bind(integration.palette)
+			)
+		: { open: false, query: '', suggestions: [], selected: -1 };
+
+	// keybindings and palette routing
 	useInput(async (input, key) => {
+		// When palette is open, route navigation and typing to it
+		if (integration && paletteState.open) {
+			if (key.return) {
+				await integration.palette.key('Enter');
+				return;
+			}
+			if (key.escape) {
+				await integration.palette.key('Escape');
+				return;
+			}
+			if (key.tab) {
+				await integration.palette.key('Tab');
+				return;
+			}
+			if (key.upArrow) {
+				await integration.palette.key('ArrowUp');
+				return;
+			}
+			if (key.downArrow) {
+				await integration.palette.key('ArrowDown');
+				return;
+			}
+			// Backspace handling: drop last character
+			if (key.backspace || (key.delete && key.ctrl)) {
+				await integration.palette.setQuery(
+					paletteState.query.slice(0, -1)
+				);
+				return;
+			}
+			// Accept printable characters and space
+			if (input && input.length === 1) {
+				await integration.palette.input(input);
+				return;
+			}
+			return;
+		}
+
+		// Global hotkeys (e.g., Mod+K for palette)
+		if (integration) {
+			const handled = await integration.hotkeys.handle({
+				key: input,
+				ctrlKey: key.ctrl,
+				altKey: key.alt,
+				shiftKey: key.shift,
+				metaKey: key.meta,
+			});
+			if (handled) {
+				return;
+			}
+		}
+
+		// Slash opens palette with a leading '/'
+		if (integration && input === '/') {
+			await integration.palette.open();
+			await integration.palette.setQuery('/');
+			return;
+		}
+
+		// History navigation
+		if (input === '[') {
+			await state.onNavigateHistory?.(-1);
+			return;
+		}
+		if (input === ']') {
+			await state.onNavigateHistory?.(1);
+			return;
+		}
+
+		// Chat-first input when chat is focused: type to compose, Enter to send
+		if (state.ui.focusIndex === 0) {
+			if (key.return) {
+				const text = state.chat.input;
+				if (text && state.onSubmitChat) {
+					await state.onSubmitChat(text);
+					// Clear the input after submitting
+					store.set((s) => ({
+						...s,
+						chat: { ...s.chat, input: '' },
+					}));
+				} else {
+					store.set((s) => ({
+						...s,
+						ui: { ...s.ui, message: 'No chat handler' },
+					}));
+				}
+				return;
+			}
+			// Recall chat history with Up/Down arrows
+			if (key.upArrow) {
+				const hist = state.ui.chatHistory ?? [];
+				if (hist.length > 0) {
+					const cur = state.ui.chatHistoryIndex ?? -1;
+					const next =
+						cur === -1 ? hist.length - 1 : Math.max(0, cur - 1);
+					store.set((s) => ({
+						...s,
+						ui: { ...s.ui, chatHistoryIndex: next },
+						chat: {
+							...s.chat,
+							input:
+								(s.ui.chatHistory ?? [])[next] ?? s.chat.input,
+						},
+					}));
+				}
+				return;
+			}
+			if (key.downArrow) {
+				const hist = state.ui.chatHistory ?? [];
+				if (hist.length > 0) {
+					const cur = state.ui.chatHistoryIndex ?? -1;
+					const next =
+						cur < 0 ? -1 : Math.min(hist.length - 1, cur + 1);
+					if (next === hist.length - 1 && cur === hist.length - 1) {
+						// stay at last
+					} else if (next === -1) {
+						store.set((s) => ({
+							...s,
+							ui: { ...s.ui, chatHistoryIndex: -1 },
+							chat: { ...s.chat, input: '' },
+						}));
+					} else {
+						store.set((s) => ({
+							...s,
+							ui: { ...s.ui, chatHistoryIndex: next },
+							chat: {
+								...s.chat,
+								input:
+									(s.ui.chatHistory ?? [])[next] ??
+									s.chat.input,
+							},
+						}));
+					}
+				}
+				return;
+			}
+			if (key.backspace) {
+				store.set((s) => ({
+					...s,
+					chat: { ...s.chat, input: s.chat.input.slice(0, -1) },
+				}));
+				return;
+			}
+			if (
+				!(key.ctrl || key.meta || key.alt) &&
+				input &&
+				input.length === 1
+			) {
+				store.set((s) => ({
+					...s,
+					chat: { ...s.chat, input: s.chat.input + input },
+				}));
+				return;
+			}
+		}
+
+		// Enter activates focused actionable element/page (non-chat)
+		if (integration && key.return && state.ui.focusIndex !== 0) {
+			await activateFocusedWithAnnounce(
+				integration.focus,
+				integration.router,
+				integration.announcer
+			);
+			return;
+		}
+
 		if (input === 'q') {
 			process.exit(0);
 			return;
 		}
-		if (key.tab) {
-			store.set((s) => ({
-				...s,
-				ui: { ...s.ui, focusIndex: (s.ui.focusIndex + 1) % 6 },
-			}));
+		// Focus navigation: Tab/Shift+Tab cycle through OPEN panels only
+		const openOrder: number[] = [0, 1, 2, 3, 4, 5].filter((idx) => {
+			switch (idx) {
+				case 0:
+					return isPanelOpen('chat');
+				case 1:
+					return isPanelOpen('context');
+				case 2:
+					return isPanelOpen('rules');
+				case 3:
+					return isPanelOpen('approvals');
+				case 4:
+					return isPanelOpen('diffs');
+				case 5:
+					return isPanelOpen('status');
+				default:
+					return false;
+			}
+		});
+		const cycleFocus = (direction: 1 | -1) => {
+			const cur = state.ui.focusIndex;
+			const idxIn = openOrder.indexOf(cur);
+			const pos = idxIn === -1 ? 0 : idxIn;
+			const nextPos =
+				(pos + (direction === 1 ? 1 : openOrder.length - 1)) %
+				Math.max(1, openOrder.length);
+			const nextIdx = openOrder.length ? openOrder[nextPos] : 0;
+			store.set((s) => ({ ...s, ui: { ...s.ui, focusIndex: nextIdx } }));
+		};
+		if (key.tab && !key.shift) {
+			cycleFocus(1);
 			return;
 		}
 		if (key.shift && key.tab) {
-			store.set((s) => ({
-				...s,
-				ui: { ...s.ui, focusIndex: (s.ui.focusIndex + 5) % 6 },
-			}));
+			cycleFocus(-1);
 			return;
 		}
 		if (input === 'r') {
@@ -86,14 +292,6 @@ export default function App({ store }: { store: TuiStore }) {
 					message: `Theme: ${next}`,
 				},
 			}));
-			return;
-		}
-		if (input === '[') {
-			await state.onNavigateHistory?.(-1);
-			return;
-		}
-		if (input === ']') {
-			await state.onNavigateHistory?.(1);
 			return;
 		}
 		if (input === 'y') {
@@ -140,30 +338,50 @@ export default function App({ store }: { store: TuiStore }) {
 
 	// pick which panels to show when narrow
 	const focused = state.ui.focusIndex;
+	function isPanelOpen(
+		id: 'chat' | 'context' | 'rules' | 'approvals' | 'diffs' | 'status'
+	): boolean {
+		const map = state.ui.panelsOpen as Record<string, boolean> | undefined;
+		return map?.[id] !== false; // default open
+	}
+
 	const leftStack = (
 		<>
-			<ChatStreamPanel
-				focused={focused === 0}
-				input={state.chat.input}
-				response={state.chat.response}
-				streaming={state.chat.streaming}
-			/>
-			<ContextPanel
-				citations={state.context.citations}
-				focused={focused === 1}
-				items={state.context.items}
-			/>
+			{isPanelOpen('chat') ? (
+				<ChatStreamPanel
+					focused={focused === 0}
+					input={state.chat.input}
+					response={state.chat.response}
+					streaming={state.chat.streaming}
+				/>
+			) : null}
+			{isPanelOpen('context') ? (
+				<ContextPanel
+					citations={state.context.citations}
+					focused={focused === 1}
+					items={state.context.items}
+					notices={state.context.notices}
+				/>
+			) : null}
 		</>
 	);
 	const rightStack = (
 		<>
-			<RulesPanel focused={focused === 2} sections={state.rules} />
-			<ApprovalsPanel
-				approvals={state.approvals}
-				focused={focused === 3}
-			/>
-			<DiffsPanel diffs={state.diffs} focused={focused === 4} />
-			<StatusPanel focused={focused === 5} status={state.status} />
+			{isPanelOpen('rules') ? (
+				<RulesPanel focused={focused === 2} sections={state.rules} />
+			) : null}
+			{isPanelOpen('approvals') ? (
+				<ApprovalsPanel
+					approvals={state.approvals}
+					focused={focused === 3}
+				/>
+			) : null}
+			{isPanelOpen('diffs') ? (
+				<DiffsPanel diffs={state.diffs} focused={focused === 4} />
+			) : null}
+			{isPanelOpen('status') ? (
+				<StatusPanel focused={focused === 5} status={state.status} />
+			) : null}
 		</>
 	);
 
@@ -182,29 +400,81 @@ export default function App({ store }: { store: TuiStore }) {
 			</Box>
 
 			{isNarrow ? (
-				// Degraded single-panel layout: only focused panel + status
+				// Degraded single-panel layout: only focused panel; status only if opened
 				<Box flexDirection="column" width="100%">
 					{focused <= 1 ? leftStack : rightStack}
-					<StatusPanel focused={false} status={state.status} />
+					{isPanelOpen('status') ? (
+						<StatusPanel focused={false} status={state.status} />
+					) : null}
 				</Box>
 			) : (
-				// Two-column layout (default)
-				<Box width="100%">
-					<Box flexDirection="column" flexGrow={1} width="60%">
-						{leftStack}
-					</Box>
-					<Box flexDirection="column" width="40%">
-						{rightStack}
-					</Box>
-				</Box>
+				// Responsive layout: single column if right side has no open panels
+				(() => {
+					const rightOpen =
+						isPanelOpen('rules') ||
+						isPanelOpen('approvals') ||
+						isPanelOpen('diffs') ||
+						isPanelOpen('status');
+					if (!rightOpen) {
+						return (
+							<Box width="100%">
+								<Box
+									flexDirection="column"
+									flexGrow={1}
+									width="100%"
+								>
+									{leftStack}
+								</Box>
+							</Box>
+						);
+					}
+					return (
+						<Box width="100%">
+							<Box
+								flexDirection="column"
+								flexGrow={1}
+								width="60%"
+							>
+								{leftStack}
+							</Box>
+							<Box flexDirection="column" width="40%">
+								{rightStack}
+							</Box>
+						</Box>
+					);
+				})()
 			)}
+
+			{/* Command palette overlay */}
+			{paletteState.open ? (
+				<Box flexDirection="column" paddingX={1} paddingY={0}>
+					<Text>
+						<Text color={theme.palette.accent}>/</Text>
+						{paletteState.query}
+					</Text>
+					{paletteState.suggestions.slice(0, 6).map((s, i) => (
+						<Text key={`${s.label}:${i}`}>
+							{paletteState.selected === i ? (
+								<Text color={theme.palette.accent}>➤ </Text>
+							) : (
+								<Text color="gray"> </Text>
+							)}
+							{s.label}
+							{s.detail ? (
+								<Text color="gray"> — {s.detail}</Text>
+							) : null}
+						</Text>
+					))}
+				</Box>
+			) : null}
 
 			{/* Footer hint */}
 			<Box paddingX={1} paddingY={1}>
 				<Text color="gray">
-					Tab/Shift+Tab: panels • r: render • t: theme • c: copy code
-					• [ / ]: history • y/n: approve/reject • o: open diff • q:
-					quit
+					Type to chat • Enter: send • /: commands • Cmd/Ctrl+K:
+					palette • Tab/Shift+Tab: panels • r: render • t: theme • c:
+					copy code • [ / ]: history • y/n: approve/reject • o: open
+					diff • q: quit
 				</Text>
 			</Box>
 		</Box>
