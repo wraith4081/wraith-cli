@@ -1,4 +1,5 @@
 import type { Announcer } from '../a11y/announcer.js';
+import { formatNotFoundMessage } from '../command/errors.js';
 import {
 	type AutocompleteOptions,
 	type CommandRegistry,
@@ -199,7 +200,17 @@ export class PaletteController {
 				await this.close();
 			}
 		} catch (err) {
-			this.state.lastMessage = (err as Error).message || 'error';
+			// Replace generic not-found with friendly suggestions
+			try {
+				const { id } = parseCommand(this.state.query);
+				const raw = (err as Error).message || '';
+				const friendly = formatNotFoundMessage(this.reg, id);
+				this.state.lastMessage = /not found/i.test(raw)
+					? friendly
+					: raw || friendly;
+			} catch {
+				this.state.lastMessage = (err as Error).message || 'error';
+			}
 			this.a11y?.announce(this.state.lastMessage, 'assertive');
 		}
 	}
