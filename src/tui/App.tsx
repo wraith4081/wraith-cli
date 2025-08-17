@@ -98,7 +98,8 @@ export default function App({
 			const handled = await integration.hotkeys.handle({
 				key: input,
 				ctrlKey: key.ctrl,
-				altKey: key.alt,
+				// biome-ignore lint/suspicious/noExplicitAny: tbd
+				altKey: (key as any)?.alt,
 				shiftKey: key.shift,
 				metaKey: key.meta,
 			});
@@ -199,7 +200,8 @@ export default function App({
 				return;
 			}
 			if (
-				!(key.ctrl || key.meta || key.alt) &&
+				// biome-ignore lint/suspicious/noExplicitAny: tbd
+				!(key.ctrl || key.meta || (key as any)?.alt) &&
 				input &&
 				input.length === 1
 			) {
