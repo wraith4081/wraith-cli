@@ -18,6 +18,7 @@ import {
 	registerSessionsHistorySubcommand,
 } from './commands/sessions';
 import { registerTemplatesCommand } from './commands/templates';
+import { registerTuiCommand } from './commands/tui';
 import { registerUsageCommand } from './commands/usage';
 
 if (typeof globalThis.Bun === 'undefined') {
@@ -134,5 +135,23 @@ registerTemplatesCommand(program);
 registerBatchCommand(program);
 registerUsageCommand(program);
 registerSelfUpdateCommand(program);
+registerTuiCommand(program);
+
+program.action(async () => {
+	// lazy import keeps cold-start fast if user never uses TUI
+	const { runTui } = await import('@tui/index');
+	const root = program.opts<{
+		model?: string;
+		profile?: string;
+		system?: string;
+		instructions?: string;
+	}>();
+	await runTui({
+		modelFlag: root.model,
+		profileFlag: root.profile,
+		systemOverride: root.system,
+		instructions: root.instructions,
+	});
+});
 
 program.parse([process.argv[0], process.argv[1], ...argvSansDashes]);

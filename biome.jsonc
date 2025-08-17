@@ -14,7 +14,8 @@
         "noParameterProperties": "off",
         "noNestedTernary": "off",
         "useConsistentMemberAccessibility": "off",
-        "useFilenamingConvention": "off"
+        "useFilenamingConvention": "off",
+        "useForOf": "off"
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": "off"

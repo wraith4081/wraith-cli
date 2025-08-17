@@ -26,6 +26,7 @@ export default defineConfig({
 			'@render': path.resolve(__dirname, 'src/render'),
 			'@sessions': path.resolve(__dirname, 'src/sessions'),
 			'@checkpoints': path.resolve(__dirname, 'src/checkpoints'),
+			'@tui': path.resolve(__dirname, 'src/tui'),
 		},
 	},
 });

@@ -24,7 +24,8 @@
       "@tools/*": ["src/tools/*"],
       "@render/*": ["src/render/*"],
       "@sessions/*": ["src/sessions/*"],
-      "@checkpoints/*": ["src/checkpoints/*"]
+      "@checkpoints/*": ["src/checkpoints/*"],
+      "@tui/*": ["src/tui/*"]
     }
   },
   "include": ["src", "bin", "tests", "bunfig.toml", "vitest.config.ts"]
