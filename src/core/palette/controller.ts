@@ -1,3 +1,4 @@
+import type { Announcer } from '../a11y/announcer.js';
 import {
 	type AutocompleteOptions,
 	type CommandRegistry,
@@ -52,15 +53,18 @@ export class PaletteController {
 	private opts: PaletteOptions;
 	private reg: CommandRegistry;
 	private provider?: AutocompleteOptions['argumentValues'];
+	private a11y?: Announcer;
 
 	constructor(
 		registry: CommandRegistry,
 		options: PaletteOptions = {},
-		provider?: AutocompleteOptions['argumentValues']
+		provider?: AutocompleteOptions['argumentValues'],
+		announcer?: Announcer
 	) {
 		this.reg = registry;
 		this.opts = options;
 		this.provider = provider;
+		this.a11y = announcer;
 	}
 
 	getState(): PaletteState {
@@ -103,6 +107,7 @@ export class PaletteController {
 					return;
 				}
 				this.state.selected = (this.state.selected + 1 + max) % max;
+				this.announceSelection();
 				return;
 			}
 			case 'ArrowUp': {
@@ -111,6 +116,7 @@ export class PaletteController {
 					return;
 				}
 				this.state.selected = (this.state.selected - 1 + max) % max;
+				this.announceSelection();
 				return;
 			}
 			case 'Tab': {
@@ -179,6 +185,7 @@ export class PaletteController {
 		if (this.state.selected < 0 && suggestions.length) {
 			this.state.selected = 0;
 		}
+		this.announceSuggestions();
 	}
 
 	async execute() {
@@ -187,11 +194,42 @@ export class PaletteController {
 			const { id, argv } = parseCommand(this.state.query);
 			await this.reg.execute(id, argv, {});
 			this.state.lastMessage = 'ok';
+			this.a11y?.announce('Command executed', 'polite');
 			if (!this.opts.persistOnExecute) {
 				await this.close();
 			}
 		} catch (err) {
 			this.state.lastMessage = (err as Error).message || 'error';
+			this.a11y?.announce(this.state.lastMessage, 'assertive');
+		}
+	}
+
+	private announceSuggestions() {
+		if (!this.a11y) {
+			return;
+		}
+		const n = this.state.suggestions.length;
+		const sel =
+			this.state.selected >= 0
+				? this.state.suggestions[this.state.selected]
+				: undefined;
+		const msg =
+			n === 0
+				? 'No suggestions'
+				: `${n} suggestions${sel ? `, ${sel.label} selected` : ''}`;
+		this.a11y.announce(msg, 'polite');
+	}
+
+	private announceSelection() {
+		if (!this.a11y) {
+			return;
+		}
+		const sel =
+			this.state.selected >= 0
+				? this.state.suggestions[this.state.selected]
+				: undefined;
+		if (sel) {
+			this.a11y.announce(`${sel.label}`, 'polite');
 		}
 	}
 }
