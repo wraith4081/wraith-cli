@@ -67,4 +67,17 @@ describe('Navigation', () => {
 		const r2 = await activateFocused(focusNewline, router);
 		expect(r2.status).toBe('no-op');
 	});
+
+	it('primary-action activates via handler', async () => {
+		const router = makeRouter(['home'], 'home');
+		const act = vi.fn(async () => {
+			//
+		});
+		const focus: FocusResolver = {
+			current: () => ({ kind: 'primary-action', activate: act }),
+		};
+		const res = await activateFocused(focus, router);
+		expect(res.status).toBe('activated');
+		expect(act).toHaveBeenCalledTimes(1);
+	});
 });
