@@ -1,6 +1,6 @@
 {
   "name": "wraith-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "module": "index.ts",
   "type": "module",
   "bin": {
@@ -44,6 +44,7 @@
     "pg": "^8.16.3",
     "pgvector": "^0.2.1",
     "react": "^19.1.1",
+    "react-devtools-core": "^6.1.5",
     "winston": "^3.17.0",
     "yaml": "^2.8.1",
     "zod": "^4.0.17"
